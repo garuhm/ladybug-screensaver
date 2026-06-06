@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <TargetFramework>net8.0-windows</TargetFramework>
+        <Nullable>enable</Nullable>
+        <UseWindowsForms>true</UseWindowsForms>
+        <ImplicitUsings>enable</ImplicitUsings>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <Folder Include="Assets\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Remove="Assets\ladybug.png" />
+      <Content Include="Assets\ladybug.png">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+
+    <ItemGroup>
+      <Compile Update="ScreensaverForm.cs">
+        <SubType>Form</SubType>
+      </Compile>
+    </ItemGroup>
+
+</Project>
