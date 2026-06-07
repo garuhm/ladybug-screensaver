@@ -18,7 +18,7 @@ Perfect for any ladybug enthusiasts
 
 ### Using the prebuilt release
 
-In `dist\`, the `.scr` and the asset folder needed are both already there. Copy both directly into `C:\Windows\System32\`. Make sure both the `.scr` file and the `Assets\` folder are directly under `System32`, or it will not work. After copying, you can freely select it in your screensaver settings.
+Download the latest available release and the source code zip file for it. Extract the `Assets/` folder, which is inside `dist/`. Once both the `.scr` and the `Assets/` folder are extracted on the same level in the folder hiearchy, copy both directly into `C:\Windows\System32\`. Make sure both the `.scr` file and the `Assets/` folder are directly under `System32`, or it will not work. After copying, you can freely select it in your screensaver settings.
 
 ### Building from source
 
