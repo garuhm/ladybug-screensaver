@@ -25,7 +25,9 @@ public class ScreensaverForm : Form
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int GetWindowLong(IntPtr handle, int index);
 
-    private static readonly Color BgColor = Color.FromArgb(198, 230, 188);
+    private static readonly Color StripeColorA = Color.FromArgb(0xC6, 0xE6, 0xBC);
+    private static readonly Color StripeColorB = Color.FromArgb(0xCF, 0xE8, 0xCA);
+    private static readonly Color BgColor      = StripeColorA; // used for BackColor
 
     private int _spawnCooldown = 60;
     private const int MinSpawnInterval = 180;
@@ -141,12 +143,27 @@ public class ScreensaverForm : Form
 
         Invalidate();
     }
+    
+    private void DrawBackground(int width, int height)
+    {
+        const int stripeWidth = 40; // pixel width of each stripe — tweak to taste
+        using var brushA = new SolidBrush(StripeColorA);
+        using var brushB = new SolidBrush(StripeColorB);
+
+        for (int x = 0; x < width; x += stripeWidth)
+        {
+            bool isEvenStripe = (x / stripeWidth) % 2 == 0;
+            _backBufferGraphics.FillRectangle(
+                isEvenStripe ? brushA : brushB,
+                x, 0, stripeWidth, height);
+        }
+    }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         if (_backBuffer == null) return;
 
-        _backBufferGraphics.Clear(BgColor);
+        DrawBackground(ClientSize.Width, ClientSize.Height);
 
         foreach (var dot in _orphanedDots) dot.Draw(_backBufferGraphics);
         foreach (var bug in _ladybugs) bug.Draw(_backBufferGraphics);

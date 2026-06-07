@@ -151,37 +151,29 @@ public class Ladybug
         _beziers              = new List<(PointF, PointF, PointF, PointF)>();
 
         int startEdge = random.Next(0, 4);
-        int endEdge;
-        do { endEdge = random.Next(0, 4); } while (endEdge == startEdge);
 
         PointF currentPoint = RandomPointOnEdge(startEdge, random);
-        PointF endPoint     = RandomPointOnEdge(endEdge, random);
         PointF exitTangent  = EdgeOutwardTangent(startEdge, random);
 
-        int loopCount          = random.Next(0, 3);
-        int minRadius          = (int)(Math.Min(_screenW, _screenH) * 0.08f);
-        int maxRadius          = (int)(Math.Min(_screenW, _screenH) * 0.17f);
-        int curveSegmentCount  = random.Next(3, 6);
-        int loopsRemaining     = loopCount;
-        float baseStepDist     = Math.Min(_screenW, _screenH) * 0.35f;
-        float headingAngle     = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
+        int loopCount         = random.Next(0, 3);
+        int minRadius         = (int)(Math.Min(_screenW, _screenH) * 0.08f);
+        int maxRadius         = (int)(Math.Min(_screenW, _screenH) * 0.17f);
+        int curveSegmentCount = random.Next(3, 6);
+        int loopsRemaining    = loopCount;
+        float baseStepDist    = Math.Min(_screenW, _screenH) * 0.35f;
+        float headingAngle    = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
 
         for (int segmentIndex = 0; segmentIndex < curveSegmentCount; segmentIndex++)
         {
-            bool isLastSegment = segmentIndex == curveSegmentCount - 1;
-
-            float maxTurnRadians = 1.1f;
-            headingAngle += (float)(random.NextDouble() * maxTurnRadians * 2 - maxTurnRadians);
+            headingAngle += (float)(random.NextDouble() * 1.1f * 2 - 1.1f);
 
             PointF targetTangent = new PointF(
                 (float)Math.Cos(headingAngle),
                 (float)Math.Sin(headingAngle));
 
-            PointF segmentEnd = isLastSegment
-                ? endPoint
-                : new PointF(
-                    currentPoint.X + targetTangent.X * baseStepDist,
-                    currentPoint.Y + targetTangent.Y * baseStepDist);
+            PointF segmentEnd = new PointF(
+                currentPoint.X + targetTangent.X * baseStepDist,
+                currentPoint.Y + targetTangent.Y * baseStepDist);
 
             float segmentDist = (float)Math.Sqrt(
                 (segmentEnd.X - currentPoint.X) * (segmentEnd.X - currentPoint.X) +
@@ -207,8 +199,8 @@ public class Ladybug
             currentPoint = segmentEnd;
 
             bool insertLoop = loopsRemaining > 0
-                              && !isLastSegment
-                              && (random.Next(0, 2) == 0 || loopsRemaining >= curveSegmentCount - segmentIndex - 1);
+                              && (random.Next(0, 2) == 0
+                                  || loopsRemaining >= curveSegmentCount - segmentIndex - 1);
             if (insertLoop)
             {
                 loopsRemaining--;
@@ -221,13 +213,11 @@ public class Ladybug
                     -loopDirection * exitTangent.Y,
                      loopDirection * exitTangent.X);
 
-                // Oval: center is closer than loopRadius so loop is squashed perpendicularly
-                float ovalHeight = loopRadius * 0.8f;
+                float  ovalHeight = loopRadius * 0.8f;
                 PointF loopCenter = new PointF(
                     currentPoint.X + loopPerpendicular.X * ovalHeight,
                     currentPoint.Y + loopPerpendicular.Y * ovalHeight);
 
-                // Reduced circleConstant for oval shape
                 float circleConstant = loopRadius * 0.5522848f * 0.8f;
 
                 float entryAngle = (float)Math.Atan2(
@@ -245,14 +235,12 @@ public class Ladybug
                     float rawX = loopRadius * (float)Math.Cos(pointAngle);
                     float rawY = loopRadius * (float)Math.Sin(pointAngle);
 
-                    // Project onto travel and perpendicular axes, scale differently
-                    // full loopRadius along travel = wide, 0.6x along perp = squashed
                     float alongTravel = rawX * exitTangent.X       + rawY * exitTangent.Y;
                     float alongPerp   = rawX * loopPerpendicular.X + rawY * loopPerpendicular.Y;
 
                     circlePoints[quarterIndex] = new PointF(
-                        loopCenter.X + alongTravel * exitTangent.X       * 0.6f + alongPerp * loopPerpendicular.X,
-                        loopCenter.Y + alongTravel * exitTangent.Y       * 0.6f + alongPerp * loopPerpendicular.Y);
+                        loopCenter.X + alongTravel * exitTangent.X      * 0.6f + alongPerp * loopPerpendicular.X,
+                        loopCenter.Y + alongTravel * exitTangent.Y      * 0.6f + alongPerp * loopPerpendicular.Y);
                 }
 
                 for (int quarterIndex = 0; quarterIndex < 4; quarterIndex++)
@@ -291,8 +279,75 @@ public class Ladybug
             }
         }
 
+        // Keep generating curve segments until the path exits the screen naturally
+        // No forced endpoint — wherever it crosses the boundary is the exit
+        bool exited = false;
+        while (!exited)
+        {
+            headingAngle += (float)(random.NextDouble() * 0.8f * 2 - 0.8f);
+
+            PointF continuationTangent = new PointF(
+                (float)Math.Cos(headingAngle),
+                (float)Math.Sin(headingAngle));
+
+            PointF continuationEnd = new PointF(
+                currentPoint.X + continuationTangent.X * baseStepDist * 0.6f,
+                currentPoint.Y + continuationTangent.Y * baseStepDist * 0.6f);
+
+            float continuationDist = (float)Math.Sqrt(
+                (continuationEnd.X - currentPoint.X) * (continuationEnd.X - currentPoint.X) +
+                (continuationEnd.Y - currentPoint.Y) * (continuationEnd.Y - currentPoint.Y));
+            if (continuationDist < 1f) continuationDist = 1f;
+
+            float continuationControlDist = continuationDist * 0.45f;
+
+            PointF continuationCp1 = new PointF(
+                currentPoint.X + exitTangent.X * continuationControlDist,
+                currentPoint.Y + exitTangent.Y * continuationControlDist);
+
+            PointF continuationCp2Perp = new PointF(-continuationTangent.Y, continuationTangent.X);
+            float  continuationCp2Bow  = continuationDist * (float)(random.NextDouble() * 0.4 + 0.15)
+                                         * (random.Next(0, 2) == 0 ? 1f : -1f);
+            PointF continuationCp2 = new PointF(
+                continuationEnd.X - continuationTangent.X * continuationControlDist
+                                  + continuationCp2Perp.X * continuationCp2Bow,
+                continuationEnd.Y - continuationTangent.Y * continuationControlDist
+                                  + continuationCp2Perp.Y * continuationCp2Bow);
+
+            // Check if this segment exits the screen
+            float exitT = FindScreenExitT(currentPoint, continuationCp1, continuationCp2, continuationEnd);
+            if (exitT < 1f)
+            {
+                // Clip the segment at the exit point — that becomes the natural endpoint
+                PointF clippedEnd = EvaluateBezier(
+                    currentPoint, continuationCp1, continuationCp2, continuationEnd, exitT);
+
+                // Scale cp2 to the clipped length so the tangent is still meaningful
+                float scale = exitT;
+                PointF clippedCp1 = new PointF(
+                    currentPoint.X     + (continuationCp1.X - currentPoint.X)     * scale,
+                    currentPoint.Y     + (continuationCp1.Y - currentPoint.Y)     * scale);
+                PointF clippedCp2 = new PointF(
+                    continuationCp2.X  + (clippedEnd.X      - continuationCp2.X)  * (1f - scale),
+                    continuationCp2.Y  + (clippedEnd.Y      - continuationCp2.Y)  * (1f - scale));
+
+                _beziers.Add((currentPoint, clippedCp1, clippedCp2, clippedEnd));
+                exited = true;
+            }
+            else
+            {
+                _beziers.Add((currentPoint, continuationCp1, continuationCp2, continuationEnd));
+                exitTangent  = BezierExitTangent(continuationCp2, continuationEnd);
+                currentPoint = continuationEnd;
+            }
+
+            // Safety cap — shouldn't normally be needed but prevents infinite loop
+            if (_beziers.Count > 30) exited = true;
+        }
+
         BuildArcTables();
     }
+
 
     // --- Edge helpers ---
 
@@ -317,6 +372,38 @@ public class Ladybug
         float length = (float)Math.Sqrt(
             rawDirection.X * rawDirection.X + rawDirection.Y * rawDirection.Y);
         return new PointF(rawDirection.X / length, rawDirection.Y / length);
+    }
+    
+    private bool IsOutsideScreen(PointF point)
+    {
+        return point.X < -_spriteW
+               || point.X > _screenW + _spriteW
+               || point.Y < -_spriteH
+               || point.Y > _screenH + _spriteH;
+    }
+
+    // Binary search for the t value where the Bézier first crosses outside the screen
+    private float FindScreenExitT(PointF p0, PointF cp1, PointF cp2, PointF p1)
+    {
+        // If the endpoint is inside the screen, no exit in this segment
+        if (!IsOutsideScreen(p1)) return 1f;
+
+        // If the startpoint is already outside, exit immediately
+        if (IsOutsideScreen(p0)) return 0f;
+
+        float low  = 0f;
+        float high = 1f;
+
+        for (int iteration = 0; iteration < 16; iteration++)
+        {
+            float  mid      = (low + high) / 2f;
+            PointF midPoint = EvaluateBezier(p0, cp1, cp2, p1, mid);
+
+            if (IsOutsideScreen(midPoint)) high = mid;
+            else                           low  = mid;
+        }
+
+        return (low + high) / 2f;
     }
 
     // --- Update / Draw ---
