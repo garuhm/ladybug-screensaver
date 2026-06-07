@@ -49,3 +49,4 @@ Most settings can be found in the following files:
 This was built in its entirety by Claude Code.
 
 I have no knowledge of C#, let alone the deep the understanding likely needed to correctly comprehend the code in this project. I am aware AI can make mistakes and suboptimal code, so if you feel inclined to open an issue for potential code optimization, I am more than happy and receptive to receive your feedback! 🐞
+
