@@ -1,5 +1,4 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-
     <PropertyGroup>
         <OutputType>WinExe</OutputType>
         <TargetFramework>net8.0-windows</TargetFramework>
@@ -12,20 +11,34 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <Folder Include="Assets\" />
+        <Folder Include="Assets\" />
     </ItemGroup>
-
     <ItemGroup>
-      <None Remove="Assets\ladybug.png" />
-      <Content Include="Assets\ladybug.png">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </Content>
+        <None Remove="Assets\ladybug.png" />
+        <Content Include="Assets\ladybug.png">
+            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
     </ItemGroup>
-
     <ItemGroup>
-      <Compile Update="ScreensaverForm.cs">
-        <SubType>Form</SubType>
-      </Compile>
+        <Compile Update="ScreensaverForm.cs">
+            <SubType>Form</SubType>
+        </Compile>
     </ItemGroup>
 
+    <Target Name="CopyToDistFolder" AfterTargets="Publish">
+        <PropertyGroup>
+            <DistFolder>$(MSBuildProjectDirectory)\..\dist</DistFolder>
+        </PropertyGroup>
+
+        <MakeDir Directories="$(DistFolder)" />
+        <MakeDir Directories="$(DistFolder)\Assets" />
+
+        <Copy
+            SourceFiles="$(PublishDir)LadybugScreensaver.exe"
+            DestinationFiles="$(DistFolder)\LadybugScreensaver.scr" />
+
+        <Copy
+            SourceFiles="$(MSBuildProjectDirectory)\Assets\ladybug.png"
+            DestinationFiles="$(DistFolder)\Assets\ladybug.png" />
+    </Target>
 </Project>
