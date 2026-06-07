@@ -169,12 +169,13 @@ public class Ladybug
 
     // --- Path generation ---
 
-    // Generates a complete path for this ladybug from scratch.
-    // The path consists of:
-    //   1. A series of expressive curved Bézier segments with random heading evolution
-    //   2. Zero, one, or two oval loops inserted organically between curve segments
-    //   3. A natural exit — continuation segments are added until the path leaves the screen,
-    //      at which point the final segment is clipped at the boundary
+    // Generates a complete path.
+    // Path composition:
+    //   1. Curved Bézier segments with random heading evolution
+    //   2. Zero, one, or two oval loops between curve segments (randomly)
+    //   3. Continuation segments for the exit (after the loops), added
+    //      until the path leaves the screen, at which point the final
+    //      segment is clipped at the boundary
     private void GeneratePath()
     {
         var random = new Random();
@@ -195,12 +196,12 @@ public class Ladybug
         float baseStepDist    = Math.Min(_screenW, _screenH) * 0.35f;
 
         // headingAngle drives the overall direction of travel and evolves gradually
-        // each segment so the path curves organically without wild direction changes
+        // to avoid corners
         float headingAngle = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
 
         for (int segmentIndex = 0; segmentIndex < curveSegmentCount; segmentIndex++)
         {
-            // Nudge heading by up to ~63 degrees — large enough for expressive curves
+            // Nudge heading by up to ~63 degrees
             headingAngle += (float)(random.NextDouble() * 1.1f * 2 - 1.1f);
 
             PointF targetTangent = new PointF(
@@ -218,15 +219,14 @@ public class Ladybug
 
             float controlDist = segmentDist * 0.45f;
 
-            // cp1 starts exactly along exitTangent — this is the mathematical requirement
-            // for tangent continuity at the join with the previous segment
+            // cp1 starts exactly along exitTangent (for continuity with previous segment)
             PointF cp1 = new PointF(
                 currentPoint.X + exitTangent.X * controlDist,
                 currentPoint.Y + exitTangent.Y * controlDist);
 
             // cp2 is bowed perpendicularly to targetTangent by a random amount.
             // Because cp1 and cp2 pull in different directions, each segment
-            // has an S-curve character even though entry tangent is always continuous.
+            // has an S-curve shape
             PointF cp2Perp = new PointF(-targetTangent.Y, targetTangent.X);
             float  cp2Bow  = segmentDist * (float)(random.NextDouble() * 0.5 + 0.25)
                              * (random.Next(0, 2) == 0 ? 1f : -1f);
@@ -240,7 +240,7 @@ public class Ladybug
             currentPoint = segmentEnd;
 
             // Decide whether to insert a loop after this segment.
-            // The second condition forces remaining loops to be placed if we're
+            // The second condition forces remaining loops to be placed if
             // running out of segments to place them in.
             bool insertLoop = loopsRemaining > 0
                               && (random.Next(0, 2) == 0
@@ -253,7 +253,7 @@ public class Ladybug
                 bool  loopAbove     = random.Next(0, 2) == 0;
                 float loopDirection = loopAbove ? -1f : 1f;
 
-                // Perpendicular to travel direction — determines which side the loop bulges
+                // Determines which side the loop bulges
                 PointF loopPerpendicular = new PointF(
                     -loopDirection * exitTangent.Y,
                      loopDirection * exitTangent.X);
@@ -272,7 +272,8 @@ public class Ladybug
                     currentPoint.Y - loopCenter.Y,
                     currentPoint.X - loopCenter.X);
 
-                // 5 points define the oval — [0] and [4] are both the entry/exit point
+                // 5 points define the oval
+                // [0] and [4] are the entry/exit points respectively
                 PointF[] circlePoints = new PointF[5];
                 circlePoints[0] = currentPoint;
                 circlePoints[4] = currentPoint;
@@ -287,7 +288,6 @@ public class Ladybug
 
                     // Project raw circle point onto travel and perpendicular axes,
                     // then scale the travel axis by 0.6 to squash the loop into an oval
-                    // that is taller than it is wide relative to the direction of travel
                     float alongTravel = rawX * exitTangent.X       + rawY * exitTangent.Y;
                     float alongPerp   = rawX * loopPerpendicular.X + rawY * loopPerpendicular.Y;
 
@@ -313,8 +313,7 @@ public class Ladybug
                         loopDirection *  (float)Math.Cos(angleAtEnd));
 
                     // Force the first quarter's cp1 to use exitTangent rather than the
-                    // geometric circle tangent — this guarantees a seamless join between
-                    // the approach curve and the loop entry
+                    // geometric circle tangent to keep the path continuous
                     PointF cp1Tangent = quarterIndex == 0 ? exitTangent : tangentAtStart;
 
                     PointF quarterCp1 = new PointF(
@@ -378,9 +377,10 @@ public class Ladybug
             float exitT = FindScreenExitT(currentPoint, continuationCp1, continuationCp2, continuationEnd);
             if (exitT < 1f)
             {
-                // This segment crosses the screen boundary — clip it at the crossing point.
-                // De Casteljau subdivision: scale cp1 forward and cp2 backward by exitT
-                // to get control points for the clipped sub-segment.
+                // This segment crosses the screen boundary and gets
+                // clipped at the crossing point. De Casteljau subdivision:
+                // scale cp1 forward and cp2 backward by exit to get control points
+                // for the clipped subsegment.
                 PointF clippedEnd = EvaluateBezier(
                     currentPoint, continuationCp1, continuationCp2, continuationEnd, exitT);
 
@@ -499,7 +499,7 @@ public class Ladybug
         Trail.RemoveAll(dot => dot.IsDead);
     }
 
-    // Draws trail dots — called before DrawSprite so dots always appear behind the bug
+    // Draws trail dots. called before DrawSprite so dots always appear behind the bug
     public void DrawTrail(Graphics g)
     {
         foreach (var dot in Trail) dot.Draw(g);
