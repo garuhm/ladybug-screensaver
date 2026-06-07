@@ -163,10 +163,14 @@ public class ScreensaverForm : Form
     {
         if (_backBuffer == null) return;
 
-        DrawBackground(ClientSize.Width, ClientSize.Height);
+        DrawBackground(_backBuffer.Width, _backBuffer.Height);
 
+        // All dots drawn first — including orphaned ones from finished bugs
         foreach (var dot in _orphanedDots) dot.Draw(_backBufferGraphics);
-        foreach (var bug in _ladybugs) bug.Draw(_backBufferGraphics);
+        foreach (var bug in _ladybugs) bug.DrawTrail(_backBufferGraphics);
+
+        // All sprites drawn on top of everything
+        foreach (var bug in _ladybugs) bug.DrawSprite(_backBufferGraphics);
 
         e.Graphics.DrawImage(_backBuffer, 0, 0);
     }

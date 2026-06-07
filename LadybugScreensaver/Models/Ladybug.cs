@@ -437,11 +437,14 @@ public class Ladybug
         foreach (var dot in Trail) dot.Update();
         Trail.RemoveAll(dot => dot.IsDead);
     }
-
-    public void Draw(Graphics g)
+    
+    public void DrawTrail(Graphics g)
     {
         foreach (var dot in Trail) dot.Draw(g);
+    }
 
+    public void DrawSprite(Graphics g)
+    {
         var graphicsState = g.Save();
         g.TranslateTransform(Position.X, Position.Y);
         g.RotateTransform(RotationAngle);
