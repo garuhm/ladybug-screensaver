@@ -7,61 +7,63 @@ public class ScreensaverForm : Form
     private readonly List<Ladybug> _ladybugs = new();
     private readonly System.Windows.Forms.Timer _timer;
     private readonly Bitmap _backBuffer;
+    private readonly Graphics _backBufferGraphics;
     private readonly Image _sprite;
-    
+
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int ShowCursor(bool bShow);
 
-    private static readonly Color BgColor = Color.FromArgb(198, 230, 188); // pale green
+    private static readonly Color BgColor = Color.FromArgb(198, 230, 188);
 
-    private int _spawnCooldown = 60; // frames until next spawn
-    private const int MinSpawnInterval = 90;
-    private const int MaxSpawnInterval = 300;
+    private int _spawnCooldown = 60;
+    private const int MinSpawnInterval = 180;
+    private const int MaxSpawnInterval = 480;
     private readonly Random _rng = new();
-    
+
     private readonly List<TrailDot> _orphanedDots = new();
-    
+
     public ScreensaverForm()
-{
-    try
     {
-        MessageBox.Show("Step 1: form properties");
-        FormBorderStyle = FormBorderStyle.None;
-        WindowState     = FormWindowState.Maximized;
-        DoubleBuffered  = true;
-        ShowCursor(false);
-        BackColor       = BgColor;
+        try
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            WindowState     = FormWindowState.Maximized;
+            DoubleBuffered  = true;
+            ShowCursor(false);
+            BackColor       = BgColor;
+            TopMost         = true;
 
-        MessageBox.Show("Step 2: loading sprite");
-        _sprite = Image.FromFile("Assets/ladybug.png");
+            _sprite = Image.FromFile("Assets/ladybug.png");
 
-        MessageBox.Show("Step 3: backbuffer");
-        var screen = Screen.PrimaryScreen!.Bounds;
-        _backBuffer = new Bitmap(screen.Width, screen.Height);
+            var screen = Screen.PrimaryScreen!.Bounds;
+            _backBuffer         = new Bitmap(screen.Width, screen.Height);
+            _backBufferGraphics = Graphics.FromImage(_backBuffer);
+            _backBufferGraphics.SmoothingMode =
+                System.Drawing.Drawing2D.SmoothingMode.HighSpeed;
+            _backBufferGraphics.CompositingQuality =
+                System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+            _backBufferGraphics.InterpolationMode =
+                System.Drawing.Drawing2D.InterpolationMode.Low;
 
-        MessageBox.Show("Step 4: timer");
-        _timer = new System.Windows.Forms.Timer { Interval = 16 };
-        _timer.Tick += OnTick;
-        _timer.Start();
+            _ladybugs.Add(new Ladybug(screen.Width, screen.Height, _sprite));
+            _spawnCooldown = _rng.Next(MinSpawnInterval, MaxSpawnInterval);
 
-        MessageBox.Show("Step 5: first ladybug");
-        _ladybugs.Add(new Ladybug(screen.Width, screen.Height, _sprite));
-        _spawnCooldown = _rng.Next(MinSpawnInterval, MaxSpawnInterval);
+            _timer = new System.Windows.Forms.Timer { Interval = 16 };
+            _timer.Tick += OnTick;
+            _timer.Start();
 
-        MessageBox.Show("Step 6: event handlers — done");
-        KeyDown    += (_, _) => Application.Exit();
-        // MouseMove  += (_, _) => Application.Exit();
-        MouseClick += (_, _) => Application.Exit();
+            KeyDown    += (_, _) => Application.Exit();
+            // MouseMove  += (_, _) => Application.Exit();
+            MouseClick += (_, _) => Application.Exit();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("CRASH: " + ex.Message + "\n\n" + ex.StackTrace);
+        }
     }
-    catch (Exception ex)
-    {
-        MessageBox.Show("CRASH: " + ex.Message + "\n\n" + ex.StackTrace);
-    }
-}
 
     private void OnTick(object? sender, EventArgs e)
     {
-        // Spawn new ladybug on interval
         _spawnCooldown--;
         if (_spawnCooldown <= 0)
         {
@@ -71,17 +73,14 @@ public class ScreensaverForm : Form
 
         foreach (var bug in _ladybugs) bug.Update();
 
-        // Remove ladybugs that have gone offscreen, but keep their orphaned trail dots alive
-        // by moving dots to a separate graveyard list
         var dead = _ladybugs.Where(b => b.IsOffscreen).ToList();
         foreach (var bug in dead)
         {
             _orphanedDots.AddRange(bug.Trail);
-            bug.Trail.Clear();         // prevent double-update
+            bug.Trail.Clear();
             _ladybugs.Remove(bug);
         }
 
-        // Update orphaned dots
         foreach (var dot in _orphanedDots) dot.Update();
         _orphanedDots.RemoveAll(d => d.IsDead);
 
@@ -91,20 +90,18 @@ public class ScreensaverForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         if (_backBuffer == null) return;
-    
-        // Draw to back buffer, then blit — prevents flicker
-        using var g = Graphics.FromImage(_backBuffer);
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.Clear(BgColor);
 
-        foreach (var dot in _orphanedDots) dot.Draw(g);
-        foreach (var bug in _ladybugs) bug.Draw(g);
+        _backBufferGraphics.Clear(BgColor);
+
+        foreach (var dot in _orphanedDots) dot.Draw(_backBufferGraphics);
+        foreach (var bug in _ladybugs) bug.Draw(_backBufferGraphics);
 
         e.Graphics.DrawImage(_backBuffer, 0, 0);
     }
-    
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        _backBufferGraphics.Dispose();
         ShowCursor(true);
         base.OnFormClosed(e);
     }
