@@ -67,7 +67,7 @@ public class ScreensaverForm : Form
             _timer.Start();
 
             KeyDown    += (_, _) => Application.Exit();
-            // MouseMove  += (_, _) => Application.Exit();
+            MouseMove  += (_, _) => Application.Exit();
             MouseClick += (_, _) => Application.Exit();
         }
         catch (Exception ex)
