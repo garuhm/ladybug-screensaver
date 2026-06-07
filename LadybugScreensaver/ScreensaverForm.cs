@@ -9,6 +9,12 @@ public class ScreensaverForm : Form
     private readonly Bitmap _backBuffer;
     private readonly Graphics _backBufferGraphics;
     private readonly Image _sprite;
+    private float _renderScale = 1f;
+    private int _maxBugCount  = 4;
+
+    private Point _lastMousePosition = Point.Empty;
+    private bool  _mousePositionSet  = false;
+    private bool  _startupComplete   = false;
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int ShowCursor(bool bShow);
@@ -27,9 +33,8 @@ public class ScreensaverForm : Form
 
     private static readonly Color StripeColorA = Color.FromArgb(0xC6, 0xE6, 0xBC);
     private static readonly Color StripeColorB = Color.FromArgb(0xCF, 0xE8, 0xCA);
-    private static readonly Color BgColor      = StripeColorA; // used for BackColor
 
-    private int _spawnCooldown = 60;
+    private int _spawnCooldown      = 60;
     private const int MinSpawnInterval = 180;
     private const int MaxSpawnInterval = 360;
     private readonly Random _rng = new();
@@ -44,8 +49,10 @@ public class ScreensaverForm : Form
             WindowState     = FormWindowState.Maximized;
             DoubleBuffered  = true;
             ShowCursor(false);
-            BackColor       = BgColor;
+            BackColor       = StripeColorA;
             TopMost         = true;
+            _renderScale    = 1f;
+            _maxBugCount    = 4;
 
             _sprite = Image.FromFile("Assets/ladybug.png");
 
@@ -66,9 +73,19 @@ public class ScreensaverForm : Form
             _timer.Tick += OnTick;
             _timer.Start();
 
-            KeyDown    += (_, _) => Application.Exit();
-            MouseMove  += (_, _) => Application.Exit();
-            MouseClick += (_, _) => Application.Exit();
+            // Delay input monitoring to let Windows finish activating the screensaver
+            var startupTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            startupTimer.Tick += (_, _) =>
+            {
+                _startupComplete = true;
+                startupTimer.Stop();
+                startupTimer.Dispose();
+            };
+            startupTimer.Start();
+
+            KeyDown    += (_, _) => { if (_startupComplete) Application.Exit(); };
+            MouseMove  += OnMouseMove;
+            MouseClick += (_, _) => { if (_startupComplete) Application.Exit(); };
         }
         catch (Exception ex)
         {
@@ -84,9 +101,11 @@ public class ScreensaverForm : Form
 
             FormBorderStyle = FormBorderStyle.None;
             DoubleBuffered  = true;
-            BackColor       = BgColor;
-            Size            = new Size(previewRect.Width, previewRect.Height);
-            Location        = new Point(0, 0);
+            BackColor       = StripeColorA;
+            _renderScale    = (float)previewRect.Width / 1920f;
+            _maxBugCount    = 1;
+
+            Size = new Size(previewRect.Width, previewRect.Height);
 
             SetParent(Handle, previewHandle);
 
@@ -94,6 +113,9 @@ public class ScreensaverForm : Form
             const int WS_CHILD  = 0x40000000;
             SetWindowLong(Handle, GWL_STYLE,
                 GetWindowLong(Handle, GWL_STYLE) | WS_CHILD);
+
+            Location = new Point(0, 0);
+            Size     = new Size(previewRect.Width, previewRect.Height);
 
             _sprite = Image.FromFile("Assets/ladybug.png");
 
@@ -106,7 +128,7 @@ public class ScreensaverForm : Form
             _backBufferGraphics.InterpolationMode =
                 System.Drawing.Drawing2D.InterpolationMode.Low;
 
-            _ladybugs.Add(new Ladybug(previewRect.Width, previewRect.Height, _sprite));
+            _ladybugs.Add(new Ladybug(previewRect.Width, previewRect.Height, _sprite, _renderScale));
             _spawnCooldown = _rng.Next(MinSpawnInterval, MaxSpawnInterval);
 
             _timer = new System.Windows.Forms.Timer { Interval = 16 };
@@ -119,12 +141,42 @@ public class ScreensaverForm : Form
         }
     }
 
+    private void OnMouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!_startupComplete) return;
+
+        if (!_mousePositionSet)
+        {
+            _lastMousePosition = e.Location;
+            _mousePositionSet  = true;
+            return;
+        }
+
+        int dx = Math.Abs(e.Location.X - _lastMousePosition.X);
+        int dy = Math.Abs(e.Location.Y - _lastMousePosition.Y);
+
+        int screenW = Screen.PrimaryScreen?.Bounds.Width  ?? 1920;
+        int screenH = Screen.PrimaryScreen?.Bounds.Height ?? 1080;
+
+        // Ignore large jumps — these are Windows warping the cursor, not real movement
+        if (dx > screenW / 4 || dy > screenH / 4)
+        {
+            _lastMousePosition = e.Location;
+            return;
+        }
+
+        _lastMousePosition = e.Location;
+
+        if (dx > 10 || dy > 10)
+            Application.Exit();
+    }
+
     private void OnTick(object? sender, EventArgs e)
     {
         _spawnCooldown--;
-        if (_spawnCooldown <= 0)
+        if (_spawnCooldown <= 0 && _ladybugs.Count < _maxBugCount)
         {
-            _ladybugs.Add(new Ladybug(ClientSize.Width, ClientSize.Height, _sprite));
+            _ladybugs.Add(new Ladybug(ClientSize.Width, ClientSize.Height, _sprite, _renderScale));
             _spawnCooldown = _rng.Next(MinSpawnInterval, MaxSpawnInterval);
         }
 
@@ -143,10 +195,10 @@ public class ScreensaverForm : Form
 
         Invalidate();
     }
-    
-    private void DrawBackground(int width, int height)
+
+    private void DrawBackground(int width, int height, float scale = 1f)
     {
-        const int stripeWidth = 40; // pixel width of each stripe — tweak to taste
+        int stripeWidth = Math.Max(1, (int)(40 * scale));
         using var brushA = new SolidBrush(StripeColorA);
         using var brushB = new SolidBrush(StripeColorB);
 
@@ -163,13 +215,10 @@ public class ScreensaverForm : Form
     {
         if (_backBuffer == null) return;
 
-        DrawBackground(_backBuffer.Width, _backBuffer.Height);
+        DrawBackground(_backBuffer.Width, _backBuffer.Height, _renderScale);
 
-        // All dots drawn first — including orphaned ones from finished bugs
         foreach (var dot in _orphanedDots) dot.Draw(_backBufferGraphics);
         foreach (var bug in _ladybugs) bug.DrawTrail(_backBufferGraphics);
-
-        // All sprites drawn on top of everything
         foreach (var bug in _ladybugs) bug.DrawSprite(_backBufferGraphics);
 
         e.Graphics.DrawImage(_backBuffer, 0, 0);
