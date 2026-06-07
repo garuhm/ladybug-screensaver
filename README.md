@@ -1,10 +1,10 @@
 ﻿# Ladybug Screensaver
 
 <div align="center">
-  <img src="../preview 1.png" width="45%" alt="preview image one">
-  <img src="../preview 2.png" width="45%" alt="preview image two">
+  <img src="./preview 1.png" width="45%" alt="preview image one">
+  <img src="./preview 2.png" width="45%" alt="preview image two">
   <br><br>
-  <img src="../preview 3.png" width="45%" alt="preview image three">
+  <img src="./preview 3.png" width="45%" alt="preview image three">
 </div>
 
 
