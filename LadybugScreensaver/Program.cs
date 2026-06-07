@@ -1,17 +1,20 @@
-namespace LadybugScreensaver;
+using LadybugScreensaver;
 
-static class Program
+ApplicationConfiguration.Initialize();
+Application.SetCompatibleTextRenderingDefault(false);
+
+string firstArg = args.Length > 0 ? args[0].ToLower().Trim() : "/s";
+
+if (firstArg.StartsWith("/p") && args.Length > 1)
 {
-    /// <summary>
-    ///  The main entry point for the application.
-    /// </summary>
-    [STAThread]
-    static void Main()
-    {
-        // To customize application configuration such as set high DPI settings or default font,
-        // see https://aka.ms/applicationconfiguration.
-        ApplicationConfiguration.Initialize();
-        Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new ScreensaverForm());
-    }
+    IntPtr previewHandle = new IntPtr(long.Parse(args[1]));
+    Application.Run(new ScreensaverForm(previewHandle));
+}
+else if (firstArg.StartsWith("/c"))
+{
+    // No settings dialog — just do nothing
+}
+else
+{
+    Application.Run(new ScreensaverForm());
 }

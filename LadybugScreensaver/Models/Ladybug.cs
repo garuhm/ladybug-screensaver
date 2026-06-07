@@ -2,26 +2,29 @@
 
 public class Ladybug
 {
-    private PointF[] _controlPoints;
-    private float _distanceTraveled  = 0f;
-    private float _pixelsPerFrame    = 2.5f;
+    // Each path element is a cubic Bézier: [p0, cp1, cp2, p1]
+    // p1 of segment N == p0 of segment N+1 (guaranteed)
+    // tangent at join is continuous because cp2 of N, p1 of N, cp1 of N+1 are collinear
+    private List<(PointF p0, PointF cp1, PointF cp2, PointF p1)> _beziers = new();
+
+    private float[] _segmentEndDistances = Array.Empty<float>();
+    private List<float[]> _segmentLocalArcTables = new();
+    private float   _totalLength;
+    private const int SamplesPerBezier = 80;
+
+    private float _distanceTraveled     = 0f;
+    private float _distanceSinceLastDot = 0f;
+    private readonly float _pixelsPerFrame = 6f;
+    private const float DotSpacing = 110f;
 
     public PointF Position      { get; private set; }
     public float  RotationAngle { get; private set; }
+    public bool   IsFinished    { get; private set; } = false;
     public List<TrailDot> Trail { get; } = new();
 
     private readonly int   _screenW, _screenH;
     private readonly Image _sprite;
     private readonly int   _spriteW = 144, _spriteH = 144;
-
-    public bool IsOffscreen => Position.X > _screenW + _spriteW;
-
-    private float[] _arcLengthTable;
-    private float   _totalLength;
-    private const int ArcTableSamples = 200;
-
-    private float _distanceSinceLastDot = 0f;
-    private const float DotSpacing = 110f;
 
     public Ladybug(int screenW, int screenH, Image sprite)
     {
@@ -31,107 +34,397 @@ public class Ladybug
         GeneratePath();
     }
 
-    private void GeneratePath()
+    // --- Bézier math ---
+
+    private static PointF EvaluateBezier(
+        PointF p0, PointF cp1, PointF cp2, PointF p1, float progress)
     {
-        var rng = new Random();
-        _distanceTraveled    = 0f;
-        _distanceSinceLastDot = 0f;
-
-        float startY = rng.Next(50, _screenH - 50);
-        float endY   = rng.Next(50, _screenH - 50);
-
-        float cp1Y = rng.Next(0, _screenH);
-        float cp2Y = rng.Next(0, _screenH);
-
-        if (Math.Abs(cp1Y - cp2Y) < _screenH * 0.4f)
-            cp2Y = _screenH - cp2Y;
-
-        _controlPoints = new[]
-        {
-            new PointF(-_spriteW, startY),
-            new PointF(_screenW * 0.25f, cp1Y),
-            new PointF(_screenW * 0.75f, cp2Y),
-            new PointF(_screenW + _spriteW, endY)
-        };
-
-        BuildArcLengthTable();
-    }
-
-    private PointF Bezier(float progress)
-    {
-        float inverse         = 1 - progress;
+        float inverse        = 1f - progress;
+        float inverseSquared = inverse  * inverse;
+        float inverseCubed   = inverseSquared * inverse;
         float progressSquared = progress * progress;
-        float inverseSquared  = inverse  * inverse;
-        float inverseCubed    = inverseSquared * inverse;
         float progressCubed   = progressSquared * progress;
 
-        var pts = _controlPoints;
-        float x = inverseCubed * pts[0].X + 3 * inverseSquared * progress * pts[1].X
-                                           + 3 * inverse * progressSquared * pts[2].X
-                                           + progressCubed * pts[3].X;
-        float y = inverseCubed * pts[0].Y + 3 * inverseSquared * progress * pts[1].Y
-                                           + 3 * inverse * progressSquared * pts[2].Y
-                                           + progressCubed * pts[3].Y;
-        return new PointF(x, y);
+        return new PointF(
+            inverseCubed   * p0.X  + 3f * inverseSquared * progress  * cp1.X
+          + 3f * inverse   * progressSquared * cp2.X + progressCubed * p1.X,
+            inverseCubed   * p0.Y  + 3f * inverseSquared * progress  * cp1.Y
+          + 3f * inverse   * progressSquared * cp2.Y + progressCubed * p1.Y);
     }
 
-    private void BuildArcLengthTable()
+    // Tangent direction at the end of a Bézier (p1 end)
+    // = direction from cp2 to p1, normalized
+    private static PointF BezierExitTangent(PointF cp2, PointF p1)
     {
-        _arcLengthTable    = new float[ArcTableSamples + 1];
-        _arcLengthTable[0] = 0f;
+        float dx  = p1.X - cp2.X;
+        float dy  = p1.Y - cp2.Y;
+        float len = (float)Math.Sqrt(dx * dx + dy * dy);
+        return len > 0 ? new PointF(dx / len, dy / len) : new PointF(1f, 0f);
+    }
 
-        PointF previousPoint    = Bezier(0f);
-        float  cumulativeLength = 0f;
+    // --- Arc length ---
 
-        for (int i = 1; i <= ArcTableSamples; i++)
+    private void BuildArcTables()
+    {
+        _segmentEndDistances  = new float[_beziers.Count];
+        _segmentLocalArcTables = new List<float[]>();
+        float cumulative = 0f;
+        const int localSamples = 40;
+
+        for (int bezierIndex = 0; bezierIndex < _beziers.Count; bezierIndex++)
         {
-            float  progress      = i / (float)ArcTableSamples;
-            PointF currentPoint  = Bezier(progress);
-            float  dx            = currentPoint.X - previousPoint.X;
-            float  dy            = currentPoint.Y - previousPoint.Y;
-            cumulativeLength    += (float)Math.Sqrt(dx * dx + dy * dy);
-            _arcLengthTable[i]   = cumulativeLength;
-            previousPoint        = currentPoint;
+            var (p0, cp1, cp2, p1) = _beziers[bezierIndex];
+            var localArc = new float[localSamples + 1];
+            localArc[0] = 0f;
+            PointF previousPoint = p0;
+
+            for (int step = 1; step <= localSamples; step++)
+            {
+                float   progress     = step / (float)localSamples;
+                PointF  currentPoint = EvaluateBezier(p0, cp1, cp2, p1, progress);
+                float   dx           = currentPoint.X - previousPoint.X;
+                float   dy           = currentPoint.Y - previousPoint.Y;
+                float   stepLength   = (float)Math.Sqrt(dx * dx + dy * dy);
+                localArc[step]       = localArc[step - 1] + stepLength;
+                cumulative          += stepLength;
+                previousPoint        = currentPoint;
+            }
+
+            _segmentLocalArcTables.Add(localArc);
+            _segmentEndDistances[bezierIndex] = cumulative;
         }
 
-        _totalLength = cumulativeLength;
+        _totalLength = cumulative;
     }
 
-    private float ArcLengthToT(float distance)
-    {
-        if (distance <= 0)            return 0f;
-        if (distance >= _totalLength) return 1f;
 
-        int low = 0, high = ArcTableSamples;
-        while (low < high - 1)
+    private PointF SampleAtDistance(float targetDistance)
+    {
+        targetDistance = Math.Clamp(targetDistance, 0f, _totalLength);
+
+        float segmentStartDistance = 0f;
+        for (int bezierIndex = 0; bezierIndex < _beziers.Count; bezierIndex++)
         {
-            int mid = (low + high) / 2;
-            if (_arcLengthTable[mid] < distance) low = mid;
-            else high = mid;
+            float segmentEndDistance = _segmentEndDistances[bezierIndex];
+
+            if (targetDistance <= segmentEndDistance || bezierIndex == _beziers.Count - 1)
+            {
+                var (p0, cp1, cp2, p1) = _beziers[bezierIndex];
+                float segmentLength    = segmentEndDistance - segmentStartDistance;
+                if (segmentLength <= 0f) return p0;
+
+                float   localTarget = targetDistance - segmentStartDistance;
+                float[] localArc    = _segmentLocalArcTables[bezierIndex];
+                int     localSamples = localArc.Length - 1;
+
+                // Binary search the pre-built local arc table — no rebuilding
+                int lo = 0, hi = localSamples;
+                while (lo < hi - 1)
+                {
+                    int mid = (lo + hi) / 2;
+                    if (localArc[mid] < localTarget) lo = mid;
+                    else hi = mid;
+                }
+
+                float blend = (localArc[hi] - localArc[lo]) > 0f
+                    ? (localTarget - localArc[lo]) / (localArc[hi] - localArc[lo])
+                    : 0f;
+                float localProgress = Math.Clamp(
+                    (lo + blend) / localSamples, 0f, 1f);
+
+                return EvaluateBezier(p0, cp1, cp2, p1, localProgress);
+            }
+
+            segmentStartDistance = segmentEndDistance;
         }
 
-        float segmentStart = _arcLengthTable[low];
-        float segmentEnd   = _arcLengthTable[high];
-        float blend        = (distance - segmentStart) / (segmentEnd - segmentStart);
-        return (low + blend) / ArcTableSamples;
+        return _beziers[^1].p1;
     }
+
+    // --- Path generation ---
+
+    private void GeneratePath()
+    {
+        var random = new Random();
+        _distanceTraveled     = 0f;
+        _distanceSinceLastDot = 0f;
+        _beziers              = new List<(PointF, PointF, PointF, PointF)>();
+
+        int startEdge = random.Next(0, 4);
+
+        PointF currentPoint = RandomPointOnEdge(startEdge, random);
+        PointF exitTangent  = EdgeOutwardTangent(startEdge, random);
+
+        int loopCount         = random.Next(0, 3);
+        int minRadius         = (int)(Math.Min(_screenW, _screenH) * 0.08f);
+        int maxRadius         = (int)(Math.Min(_screenW, _screenH) * 0.17f);
+        int curveSegmentCount = random.Next(3, 6);
+        int loopsRemaining    = loopCount;
+        float baseStepDist    = Math.Min(_screenW, _screenH) * 0.35f;
+        float headingAngle    = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
+
+        for (int segmentIndex = 0; segmentIndex < curveSegmentCount; segmentIndex++)
+        {
+            headingAngle += (float)(random.NextDouble() * 1.1f * 2 - 1.1f);
+
+            PointF targetTangent = new PointF(
+                (float)Math.Cos(headingAngle),
+                (float)Math.Sin(headingAngle));
+
+            PointF segmentEnd = new PointF(
+                currentPoint.X + targetTangent.X * baseStepDist,
+                currentPoint.Y + targetTangent.Y * baseStepDist);
+
+            float segmentDist = (float)Math.Sqrt(
+                (segmentEnd.X - currentPoint.X) * (segmentEnd.X - currentPoint.X) +
+                (segmentEnd.Y - currentPoint.Y) * (segmentEnd.Y - currentPoint.Y));
+            if (segmentDist < 1f) segmentDist = 1f;
+
+            float controlDist = segmentDist * 0.45f;
+
+            PointF cp1 = new PointF(
+                currentPoint.X + exitTangent.X * controlDist,
+                currentPoint.Y + exitTangent.Y * controlDist);
+
+            PointF cp2Perp = new PointF(-targetTangent.Y, targetTangent.X);
+            float  cp2Bow  = segmentDist * (float)(random.NextDouble() * 0.5 + 0.25)
+                             * (random.Next(0, 2) == 0 ? 1f : -1f);
+            PointF cp2 = new PointF(
+                segmentEnd.X - targetTangent.X * controlDist + cp2Perp.X * cp2Bow,
+                segmentEnd.Y - targetTangent.Y * controlDist + cp2Perp.Y * cp2Bow);
+
+            _beziers.Add((currentPoint, cp1, cp2, segmentEnd));
+
+            exitTangent  = BezierExitTangent(cp2, segmentEnd);
+            currentPoint = segmentEnd;
+
+            bool insertLoop = loopsRemaining > 0
+                              && (random.Next(0, 2) == 0
+                                  || loopsRemaining >= curveSegmentCount - segmentIndex - 1);
+            if (insertLoop)
+            {
+                loopsRemaining--;
+
+                float loopRadius    = random.Next(minRadius, maxRadius);
+                bool  loopAbove     = random.Next(0, 2) == 0;
+                float loopDirection = loopAbove ? -1f : 1f;
+
+                PointF loopPerpendicular = new PointF(
+                    -loopDirection * exitTangent.Y,
+                     loopDirection * exitTangent.X);
+
+                float  ovalHeight = loopRadius * 0.8f;
+                PointF loopCenter = new PointF(
+                    currentPoint.X + loopPerpendicular.X * ovalHeight,
+                    currentPoint.Y + loopPerpendicular.Y * ovalHeight);
+
+                float circleConstant = loopRadius * 0.5522848f * 0.8f;
+
+                float entryAngle = (float)Math.Atan2(
+                    currentPoint.Y - loopCenter.Y,
+                    currentPoint.X - loopCenter.X);
+
+                PointF[] circlePoints = new PointF[5];
+                circlePoints[0] = currentPoint;
+                circlePoints[4] = currentPoint;
+                for (int quarterIndex = 1; quarterIndex <= 3; quarterIndex++)
+                {
+                    float pointAngle = entryAngle
+                                       + loopDirection * quarterIndex * (float)Math.PI / 2f;
+
+                    float rawX = loopRadius * (float)Math.Cos(pointAngle);
+                    float rawY = loopRadius * (float)Math.Sin(pointAngle);
+
+                    float alongTravel = rawX * exitTangent.X       + rawY * exitTangent.Y;
+                    float alongPerp   = rawX * loopPerpendicular.X + rawY * loopPerpendicular.Y;
+
+                    circlePoints[quarterIndex] = new PointF(
+                        loopCenter.X + alongTravel * exitTangent.X      * 0.6f + alongPerp * loopPerpendicular.X,
+                        loopCenter.Y + alongTravel * exitTangent.Y      * 0.6f + alongPerp * loopPerpendicular.Y);
+                }
+
+                for (int quarterIndex = 0; quarterIndex < 4; quarterIndex++)
+                {
+                    float angleAtStart = entryAngle
+                                         + loopDirection * quarterIndex       * (float)Math.PI / 2f;
+                    float angleAtEnd   = entryAngle
+                                         + loopDirection * (quarterIndex + 1) * (float)Math.PI / 2f;
+
+                    PointF tangentAtStart = new PointF(
+                        loopDirection * -(float)Math.Sin(angleAtStart),
+                        loopDirection *  (float)Math.Cos(angleAtStart));
+                    PointF tangentAtEnd = new PointF(
+                        loopDirection * -(float)Math.Sin(angleAtEnd),
+                        loopDirection *  (float)Math.Cos(angleAtEnd));
+
+                    PointF cp1Tangent = quarterIndex == 0 ? exitTangent : tangentAtStart;
+
+                    PointF quarterCp1 = new PointF(
+                        circlePoints[quarterIndex].X     + cp1Tangent.X * circleConstant,
+                        circlePoints[quarterIndex].Y     + cp1Tangent.Y * circleConstant);
+                    PointF quarterCp2 = new PointF(
+                        circlePoints[quarterIndex + 1].X - tangentAtEnd.X * circleConstant,
+                        circlePoints[quarterIndex + 1].Y - tangentAtEnd.Y * circleConstant);
+
+                    _beziers.Add((
+                        circlePoints[quarterIndex],
+                        quarterCp1,
+                        quarterCp2,
+                        circlePoints[quarterIndex + 1]));
+                }
+
+                exitTangent  = BezierExitTangent(_beziers[^1].cp2, _beziers[^1].p1);
+                headingAngle = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
+                currentPoint = circlePoints[4];
+            }
+        }
+
+        // Keep generating curve segments until the path exits the screen naturally
+        // No forced endpoint — wherever it crosses the boundary is the exit
+        bool exited = false;
+        while (!exited)
+        {
+            headingAngle += (float)(random.NextDouble() * 0.8f * 2 - 0.8f);
+
+            PointF continuationTangent = new PointF(
+                (float)Math.Cos(headingAngle),
+                (float)Math.Sin(headingAngle));
+
+            PointF continuationEnd = new PointF(
+                currentPoint.X + continuationTangent.X * baseStepDist * 0.6f,
+                currentPoint.Y + continuationTangent.Y * baseStepDist * 0.6f);
+
+            float continuationDist = (float)Math.Sqrt(
+                (continuationEnd.X - currentPoint.X) * (continuationEnd.X - currentPoint.X) +
+                (continuationEnd.Y - currentPoint.Y) * (continuationEnd.Y - currentPoint.Y));
+            if (continuationDist < 1f) continuationDist = 1f;
+
+            float continuationControlDist = continuationDist * 0.45f;
+
+            PointF continuationCp1 = new PointF(
+                currentPoint.X + exitTangent.X * continuationControlDist,
+                currentPoint.Y + exitTangent.Y * continuationControlDist);
+
+            PointF continuationCp2Perp = new PointF(-continuationTangent.Y, continuationTangent.X);
+            float  continuationCp2Bow  = continuationDist * (float)(random.NextDouble() * 0.4 + 0.15)
+                                         * (random.Next(0, 2) == 0 ? 1f : -1f);
+            PointF continuationCp2 = new PointF(
+                continuationEnd.X - continuationTangent.X * continuationControlDist
+                                  + continuationCp2Perp.X * continuationCp2Bow,
+                continuationEnd.Y - continuationTangent.Y * continuationControlDist
+                                  + continuationCp2Perp.Y * continuationCp2Bow);
+
+            // Check if this segment exits the screen
+            float exitT = FindScreenExitT(currentPoint, continuationCp1, continuationCp2, continuationEnd);
+            if (exitT < 1f)
+            {
+                // Clip the segment at the exit point — that becomes the natural endpoint
+                PointF clippedEnd = EvaluateBezier(
+                    currentPoint, continuationCp1, continuationCp2, continuationEnd, exitT);
+
+                // Scale cp2 to the clipped length so the tangent is still meaningful
+                float scale = exitT;
+                PointF clippedCp1 = new PointF(
+                    currentPoint.X     + (continuationCp1.X - currentPoint.X)     * scale,
+                    currentPoint.Y     + (continuationCp1.Y - currentPoint.Y)     * scale);
+                PointF clippedCp2 = new PointF(
+                    continuationCp2.X  + (clippedEnd.X      - continuationCp2.X)  * (1f - scale),
+                    continuationCp2.Y  + (clippedEnd.Y      - continuationCp2.Y)  * (1f - scale));
+
+                _beziers.Add((currentPoint, clippedCp1, clippedCp2, clippedEnd));
+                exited = true;
+            }
+            else
+            {
+                _beziers.Add((currentPoint, continuationCp1, continuationCp2, continuationEnd));
+                exitTangent  = BezierExitTangent(continuationCp2, continuationEnd);
+                currentPoint = continuationEnd;
+            }
+
+            // Safety cap — shouldn't normally be needed but prevents infinite loop
+            if (_beziers.Count > 30) exited = true;
+        }
+
+        BuildArcTables();
+    }
+
+
+    // --- Edge helpers ---
+
+    private PointF RandomPointOnEdge(int edge, Random random) => edge switch
+    {
+        0 => new PointF(random.Next(0, _screenW), -_spriteH),
+        1 => new PointF(_screenW + _spriteW,       random.Next(0, _screenH)),
+        2 => new PointF(random.Next(0, _screenW),  _screenH + _spriteH),
+        _ => new PointF(-_spriteW,                 random.Next(0, _screenH))
+    };
+
+    private PointF EdgeOutwardTangent(int edge, Random random)
+    {
+        float wobble = (float)(random.NextDouble() * 0.4 - 0.2);
+        PointF rawDirection = edge switch
+        {
+            0 => new PointF(wobble,  1f),
+            1 => new PointF(-1f,     wobble),
+            2 => new PointF(wobble, -1f),
+            _ => new PointF(1f,      wobble)
+        };
+        float length = (float)Math.Sqrt(
+            rawDirection.X * rawDirection.X + rawDirection.Y * rawDirection.Y);
+        return new PointF(rawDirection.X / length, rawDirection.Y / length);
+    }
+    
+    private bool IsOutsideScreen(PointF point)
+    {
+        return point.X < -_spriteW
+               || point.X > _screenW + _spriteW
+               || point.Y < -_spriteH
+               || point.Y > _screenH + _spriteH;
+    }
+
+    // Binary search for the t value where the Bézier first crosses outside the screen
+    private float FindScreenExitT(PointF p0, PointF cp1, PointF cp2, PointF p1)
+    {
+        // If the endpoint is inside the screen, no exit in this segment
+        if (!IsOutsideScreen(p1)) return 1f;
+
+        // If the startpoint is already outside, exit immediately
+        if (IsOutsideScreen(p0)) return 0f;
+
+        float low  = 0f;
+        float high = 1f;
+
+        for (int iteration = 0; iteration < 16; iteration++)
+        {
+            float  mid      = (low + high) / 2f;
+            PointF midPoint = EvaluateBezier(p0, cp1, cp2, p1, mid);
+
+            if (IsOutsideScreen(midPoint)) high = mid;
+            else                           low  = mid;
+        }
+
+        return (low + high) / 2f;
+    }
+
+    // --- Update / Draw ---
 
     public void Update()
     {
+        if (IsFinished) return;
+
         _distanceTraveled += _pixelsPerFrame;
         if (_distanceTraveled >= _totalLength)
         {
-            GeneratePath();
+            IsFinished = true;
             return;
         }
 
-        float  progress = ArcLengthToT(_distanceTraveled);
-        Position = Bezier(progress);
+        Position = SampleAtDistance(_distanceTraveled);
 
-        float  progressAhead = ArcLengthToT(Math.Min(_distanceTraveled + 5f, _totalLength));
-        PointF ahead         = Bezier(progressAhead);
-        float  dx            = ahead.X - Position.X;
-        float  dy            = ahead.Y - Position.Y;
+        PointF lookAheadPoint = SampleAtDistance(
+            Math.Min(_distanceTraveled + 8f, _totalLength));
+        float dx = lookAheadPoint.X - Position.X;
+        float dy = lookAheadPoint.Y - Position.Y;
         RotationAngle = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI) + 90f;
 
         _distanceSinceLastDot += _pixelsPerFrame;
@@ -142,13 +435,16 @@ public class Ladybug
         }
 
         foreach (var dot in Trail) dot.Update();
-        Trail.RemoveAll(d => d.IsDead);
+        Trail.RemoveAll(dot => dot.IsDead);
     }
-
-    public void Draw(Graphics g)
+    
+    public void DrawTrail(Graphics g)
     {
         foreach (var dot in Trail) dot.Draw(g);
+    }
 
+    public void DrawSprite(Graphics g)
+    {
         var graphicsState = g.Save();
         g.TranslateTransform(Position.X, Position.Y);
         g.RotateTransform(RotationAngle);
