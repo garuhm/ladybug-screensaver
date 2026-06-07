@@ -61,16 +61,6 @@ public class Ladybug
         return len > 0 ? new PointF(dx / len, dy / len) : new PointF(1f, 0f);
     }
 
-    // Given exit tangent and desired control point distance,
-    // returns cp1 for the NEXT segment that is tangent-continuous
-    private static PointF ContinuousEntryControlPoint(
-        PointF segmentStart, PointF exitTangent, float controlDistance)
-    {
-        return new PointF(
-            segmentStart.X + exitTangent.X * controlDistance,
-            segmentStart.Y + exitTangent.Y * controlDistance);
-    }
-
     // --- Arc length ---
 
     private void BuildArcTables()
@@ -173,120 +163,135 @@ public class Ladybug
         PointF endPoint     = RandomPointOnEdge(endEdge, random);
         PointF exitTangent  = EdgeOutwardTangent(startEdge, random);
 
-        int loopCount = random.Next(0, 3);
-        int minRadius = (int)(Math.Min(_screenW, _screenH) * 0.08f);
-        int maxRadius = (int)(Math.Min(_screenW, _screenH) * 0.17f);
+        int loopCount          = random.Next(0, 3);
+        int minRadius          = (int)(Math.Min(_screenW, _screenH) * 0.08f);
+        int maxRadius          = (int)(Math.Min(_screenW, _screenH) * 0.17f);
+        int curveSegmentCount  = random.Next(3, 6);
+        int loopsRemaining     = loopCount;
+        float baseStepDist     = Math.Min(_screenW, _screenH) * 0.35f;
+        float headingAngle     = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
 
-        for (int loop = 0; loop < loopCount; loop++)
+        for (int segmentIndex = 0; segmentIndex < curveSegmentCount; segmentIndex++)
         {
-            float loopRadius    = random.Next(minRadius, maxRadius);
-            bool  loopAbove     = random.Next(0, 2) == 0;
-            // +1 = loop curves above travel direction, -1 = below
-            float loopDirection = loopAbove ? -1f : 1f;
+            bool isLastSegment = segmentIndex == curveSegmentCount - 1;
 
-            float straightDistance = random.Next(
-                (int)(Math.Min(_screenW, _screenH) * 0.25f),
-                (int)(Math.Min(_screenW, _screenH) * 0.45f));
+            // Evolve heading gradually — large enough for expressive curves
+            float maxTurnRadians = 1.1f;
+            headingAngle += (float)(random.NextDouble() * maxTurnRadians * 2 - maxTurnRadians);
 
-            PointF loopEntryPoint = new PointF(
-                currentPoint.X + exitTangent.X * straightDistance,
-                currentPoint.Y + exitTangent.Y * straightDistance);
+            PointF targetTangent = new PointF(
+                (float)Math.Cos(headingAngle),
+                (float)Math.Sin(headingAngle));
 
-            // Approach segment — arrives at loopEntryPoint exactly along exitTangent
-            float  approachControlDist = straightDistance * 0.4f;
-            PointF approachCp1 = new PointF(
-                currentPoint.X  + exitTangent.X * approachControlDist,
-                currentPoint.Y  + exitTangent.Y * approachControlDist);
-            PointF approachCp2 = new PointF(
-                loopEntryPoint.X - exitTangent.X * approachControlDist,
-                loopEntryPoint.Y - exitTangent.Y * approachControlDist);
+            PointF segmentEnd = isLastSegment
+                ? endPoint
+                : new PointF(
+                    currentPoint.X + targetTangent.X * baseStepDist,
+                    currentPoint.Y + targetTangent.Y * baseStepDist);
 
-            _beziers.Add((currentPoint, approachCp1, approachCp2, loopEntryPoint));
+            float segmentDist = (float)Math.Sqrt(
+                (segmentEnd.X - currentPoint.X) * (segmentEnd.X - currentPoint.X) +
+                (segmentEnd.Y - currentPoint.Y) * (segmentEnd.Y - currentPoint.Y));
+            if (segmentDist < 1f) segmentDist = 1f;
 
-            // Loop center is offset perpendicular to exitTangent
-            // perpendicular is rotated 90 degrees in the loop direction
-            PointF perpendicular = new PointF(
-                -loopDirection * exitTangent.Y,
-                 loopDirection * exitTangent.X);
+            float controlDist = segmentDist * 0.45f;
 
-            PointF loopCenter = new PointF(
-                loopEntryPoint.X + perpendicular.X * loopRadius,
-                loopEntryPoint.Y + perpendicular.Y * loopRadius);
+            // cp1 — must start EXACTLY along exitTangent, no perpendicular bow
+            // This is what guarantees tangent continuity at every join
+            PointF cp1 = new PointF(
+                currentPoint.X + exitTangent.X * controlDist,
+                currentPoint.Y + exitTangent.Y * controlDist);
 
-            // The circle tangent at the entry point must equal exitTangent.
-            // On a circle, tangent = loopDirection * perpendicular rotated 90 = exitTangent.
-            // We verify: entry is at angle = atan2(-perp.Y, -perp.X) from center.
-            // Tangent there (CCW) = (-sin(angle), cos(angle)) * loopDirection.
-            // With our perpendicular definition this works out to exitTangent exactly.
-            float circleConstant = loopRadius * 0.5522848f;
+            // cp2 — bowed perpendicularly to targetTangent
+            // Because cp1 and cp2 pull in different directions, the segment
+            // is S-shaped even though the entry tangent is continuous
+            PointF cp2Perp = new PointF(-targetTangent.Y, targetTangent.X);
+            float  cp2Bow  = segmentDist * (float)(random.NextDouble() * 0.5 + 0.25)
+                             * (random.Next(0, 2) == 0 ? 1f : -1f);
+            PointF cp2 = new PointF(
+                segmentEnd.X - targetTangent.X * controlDist + cp2Perp.X * cp2Bow,
+                segmentEnd.Y - targetTangent.Y * controlDist + cp2Perp.Y * cp2Bow);
 
-            // 4 quarter points around the circle
-            // entry angle = direction from loopCenter to loopEntryPoint
-            float entryAngle = (float)Math.Atan2(
-                loopEntryPoint.Y - loopCenter.Y,
-                loopEntryPoint.X - loopCenter.X);
+            _beziers.Add((currentPoint, cp1, cp2, segmentEnd));
 
-            PointF[] circlePoints = new PointF[5];
-            circlePoints[0] = loopEntryPoint;
-            circlePoints[4] = loopEntryPoint;
-            for (int quarterIndex = 1; quarterIndex <= 3; quarterIndex++)
+            exitTangent  = BezierExitTangent(cp2, segmentEnd);
+            currentPoint = segmentEnd;
+
+            // Insert a loop after this segment if scheduled
+            bool insertLoop = loopsRemaining > 0
+                              && !isLastSegment
+                              && random.Next(0, curveSegmentCount - segmentIndex) <= loopsRemaining;
+            if (insertLoop)
             {
-                float pointAngle = entryAngle + loopDirection * quarterIndex * (float)Math.PI / 2f;
-                circlePoints[quarterIndex] = new PointF(
-                    loopCenter.X + loopRadius * (float)Math.Cos(pointAngle),
-                    loopCenter.Y + loopRadius * (float)Math.Sin(pointAngle));
+                loopsRemaining--;
+
+                float loopRadius    = random.Next(minRadius, maxRadius);
+                bool  loopAbove     = random.Next(0, 2) == 0;
+                float loopDirection = loopAbove ? -1f : 1f;
+
+                PointF loopPerpendicular = new PointF(
+                    -loopDirection * exitTangent.Y,
+                     loopDirection * exitTangent.X);
+
+                PointF loopCenter = new PointF(
+                    currentPoint.X + loopPerpendicular.X * loopRadius,
+                    currentPoint.Y + loopPerpendicular.Y * loopRadius);
+
+                float circleConstant = loopRadius * 0.5522848f;
+
+                float entryAngle = (float)Math.Atan2(
+                    currentPoint.Y - loopCenter.Y,
+                    currentPoint.X - loopCenter.X);
+
+                PointF[] circlePoints = new PointF[5];
+                circlePoints[0] = currentPoint;
+                circlePoints[4] = currentPoint;
+                for (int quarterIndex = 1; quarterIndex <= 3; quarterIndex++)
+                {
+                    float pointAngle = entryAngle
+                                       + loopDirection * quarterIndex * (float)Math.PI / 2f;
+                    circlePoints[quarterIndex] = new PointF(
+                        loopCenter.X + loopRadius * (float)Math.Cos(pointAngle),
+                        loopCenter.Y + loopRadius * (float)Math.Sin(pointAngle));
+                }
+
+                for (int quarterIndex = 0; quarterIndex < 4; quarterIndex++)
+                {
+                    float angleAtStart = entryAngle
+                                         + loopDirection * quarterIndex       * (float)Math.PI / 2f;
+                    float angleAtEnd   = entryAngle
+                                         + loopDirection * (quarterIndex + 1) * (float)Math.PI / 2f;
+
+                    PointF tangentAtStart = new PointF(
+                        loopDirection * -(float)Math.Sin(angleAtStart),
+                        loopDirection *  (float)Math.Cos(angleAtStart));
+                    PointF tangentAtEnd = new PointF(
+                        loopDirection * -(float)Math.Sin(angleAtEnd),
+                        loopDirection *  (float)Math.Cos(angleAtEnd));
+
+                    // Force first cp1 to exitTangent — seamless join into loop
+                    PointF cp1Tangent = quarterIndex == 0 ? exitTangent : tangentAtStart;
+
+                    PointF quarterCp1 = new PointF(
+                        circlePoints[quarterIndex].X     + cp1Tangent.X * circleConstant,
+                        circlePoints[quarterIndex].Y     + cp1Tangent.Y * circleConstant);
+                    PointF quarterCp2 = new PointF(
+                        circlePoints[quarterIndex + 1].X - tangentAtEnd.X * circleConstant,
+                        circlePoints[quarterIndex + 1].Y - tangentAtEnd.Y * circleConstant);
+
+                    _beziers.Add((
+                        circlePoints[quarterIndex],
+                        quarterCp1,
+                        quarterCp2,
+                        circlePoints[quarterIndex + 1]));
+                }
+
+                // Loop exit — update heading to match so next segment flows naturally
+                exitTangent  = BezierExitTangent(_beziers[^1].cp2, _beziers[^1].p1);
+                headingAngle = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
+                currentPoint = circlePoints[4];
             }
-
-            // Build 4 quarter-circle Bézier segments
-            // At each circle point, the tangent = loopDirection * (-sin(angle), cos(angle))
-            for (int quarterIndex = 0; quarterIndex < 4; quarterIndex++)
-            {
-                float angleAtStart = entryAngle
-                                     + loopDirection * quarterIndex       * (float)Math.PI / 2f;
-                float angleAtEnd   = entryAngle
-                                     + loopDirection * (quarterIndex + 1) * (float)Math.PI / 2f;
-
-                // Circle tangent at each point, in the direction of travel around the loop
-                PointF tangentAtStart = new PointF(
-                    loopDirection * -(float)Math.Sin(angleAtStart),
-                    loopDirection *  (float)Math.Cos(angleAtStart));
-                PointF tangentAtEnd = new PointF(
-                    loopDirection * -(float)Math.Sin(angleAtEnd),
-                    loopDirection *  (float)Math.Cos(angleAtEnd));
-
-                // For quarterIndex == 0: tangentAtStart must equal exitTangent
-                // If it doesn't, we override it to guarantee the smooth join
-                PointF cp1Tangent = quarterIndex == 0 ? exitTangent : tangentAtStart;
-
-                PointF quarterCp1 = new PointF(
-                    circlePoints[quarterIndex].X     + cp1Tangent.X * circleConstant,
-                    circlePoints[quarterIndex].Y     + cp1Tangent.Y * circleConstant);
-                PointF quarterCp2 = new PointF(
-                    circlePoints[quarterIndex + 1].X - tangentAtEnd.X * circleConstant,
-                    circlePoints[quarterIndex + 1].Y - tangentAtEnd.Y * circleConstant);
-
-                _beziers.Add((
-                    circlePoints[quarterIndex],
-                    quarterCp1,
-                    quarterCp2,
-                    circlePoints[quarterIndex + 1]));
-            }
-
-            currentPoint = loopEntryPoint;
-            exitTangent  = BezierExitTangent(_beziers[^1].cp2, _beziers[^1].p1);
         }
-
-        // Final segment to exit edge
-        float  finalControlDist = 200f;
-        PointF finalCp1 = new PointF(
-            currentPoint.X + exitTangent.X * finalControlDist,
-            currentPoint.Y + exitTangent.Y * finalControlDist);
-        PointF exitInwardNormal = EdgeInwardNormal(endEdge);
-        PointF finalCp2 = new PointF(
-            endPoint.X + exitInwardNormal.X * finalControlDist,
-            endPoint.Y + exitInwardNormal.Y * finalControlDist);
-
-        _beziers.Add((currentPoint, finalCp1, finalCp2, endPoint));
 
         BuildArcTables();
     }
@@ -315,14 +320,6 @@ public class Ladybug
             rawDirection.X * rawDirection.X + rawDirection.Y * rawDirection.Y);
         return new PointF(rawDirection.X / length, rawDirection.Y / length);
     }
-
-    private PointF EdgeInwardNormal(int edge) => edge switch
-    {
-        0 => new PointF(0f,  1f),
-        1 => new PointF(-1f, 0f),
-        2 => new PointF(0f, -1f),
-        _ => new PointF(1f,  0f)
-    };
 
     // --- Update / Draw ---
 
