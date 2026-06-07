@@ -1,59 +1,81 @@
 ﻿namespace LadybugScreensaver.Models;
 
+// Represents a single ladybug that travels across the screen along a 
+// generated curved path made of chained cubic Bézier segments. The path is tangent-continuous
+// at every join (to prevent sharp corners) and may include oval loops.
+
+// Arc-length parameterization ensures the bug moves at a constant pixel speed regardless of
+// how curved the path is.
 public class Ladybug
 {
-    // Each path element is a cubic Bézier: [p0, cp1, cp2, p1]
-    // p1 of segment N == p0 of segment N+1 (guaranteed)
-    // tangent at join is continuous because cp2 of N, p1 of N, cp1 of N+1 are collinear
+    // Path stored as a list of cubic Bézier segments.
+    // Each segment is (p0, cp1, cp2, p1) where p1 of segment N == p0 of segment N+1.
+    // Tangent continuity is guaranteed because cp2[N], p1[N], cp1[N+1] are collinear.
     private List<(PointF p0, PointF cp1, PointF cp2, PointF p1)> _beziers = new();
 
+    // Cumulative arc distance at the end of each Bézier segment.
+    // Used to quickly find which segment contains a given travel distance.
     private float[] _segmentEndDistances = Array.Empty<float>();
-    private List<float[]> _segmentLocalArcTables = new();
-    private float   _totalLength;
-    private const int SamplesPerBezier = 80;
 
-    private float _distanceTraveled     = 0f;
-    private float _distanceSinceLastDot = 0f;
-    private readonly float _pixelsPerFrame = 6f;
-    private const float DotSpacing = 110f;
+    // Per-segment arc length lookup tables. Pre-built so SampleAtDistance
+    // never has to recompute them at runtime, which would cause lag.
+    private List<float[]> _segmentLocalArcTables = new();
+
+    private float _totalLength;
+    private const int SamplesPerBezier = 80; // samples used when building each arc table
+
+    private float _distanceTraveled;      // total pixels traveled along the path so far
+    private float _distanceSinceLastDot;  // pixels since the last trail dot was placed
+    private float _pixelsPerFrame;        // movement speed (scaled for preview mode)
+    private float _dotSpacing;            // pixel gap between trail dots (scaled for preview mode)
+    private int   _dotRadius;             // trail dot size (scaled for preview mode)
 
     public PointF Position      { get; private set; }
-    public float  RotationAngle { get; private set; }
+    public float  RotationAngle { get; private set; } // degrees, used for sprite rotation
     public bool   IsFinished    { get; private set; } = false;
     public List<TrailDot> Trail { get; } = new();
 
     private readonly int   _screenW, _screenH;
     private readonly Image _sprite;
-    private readonly int   _spriteW = 144, _spriteH = 144;
+    private int _spriteW; // sprite draw width (scaled for preview mode)
+    private int _spriteH; // sprite draw height (scaled for preview mode)
 
-    public Ladybug(int screenW, int screenH, Image sprite)
+    // scale = 1f for fullscreen, < 1f for the small preview window
+    public Ladybug(int screenW, int screenH, Image sprite, float scale = 1f)
     {
-        _screenW = screenW;
-        _screenH = screenH;
-        _sprite  = sprite;
+        _screenW        = screenW;
+        _screenH        = screenH;
+        _sprite         = sprite;
+        _pixelsPerFrame = 6f    * scale;
+        _spriteW        = (int)(144f * scale);
+        _spriteH        = (int)(144f * scale);
+        _dotSpacing     = 110f  * scale;
+        _dotRadius      = Math.Max(1, (int)(7f * scale));
         GeneratePath();
     }
 
     // --- Bézier math ---
 
+    // Evaluates a cubic Bézier at a given progress value (0–1).
     private static PointF EvaluateBezier(
         PointF p0, PointF cp1, PointF cp2, PointF p1, float progress)
     {
-        float inverse        = 1f - progress;
-        float inverseSquared = inverse  * inverse;
-        float inverseCubed   = inverseSquared * inverse;
-        float progressSquared = progress * progress;
+        float inverse         = 1f - progress;
+        float inverseSquared  = inverse   * inverse;
+        float inverseCubed    = inverseSquared * inverse;
+        float progressSquared = progress  * progress;
         float progressCubed   = progressSquared * progress;
 
         return new PointF(
-            inverseCubed   * p0.X  + 3f * inverseSquared * progress  * cp1.X
-          + 3f * inverse   * progressSquared * cp2.X + progressCubed * p1.X,
-            inverseCubed   * p0.Y  + 3f * inverseSquared * progress  * cp1.Y
-          + 3f * inverse   * progressSquared * cp2.Y + progressCubed * p1.Y);
+            inverseCubed  * p0.X + 3f * inverseSquared * progress * cp1.X
+          + 3f * inverse  * progressSquared * cp2.X + progressCubed * p1.X,
+            inverseCubed  * p0.Y + 3f * inverseSquared * progress * cp1.Y
+          + 3f * inverse  * progressSquared * cp2.Y + progressCubed * p1.Y);
     }
 
-    // Tangent direction at the end of a Bézier (p1 end)
-    // = direction from cp2 to p1, normalized
+    // Returns the normalized tangent direction at the end of a Bézier segment.
+    // The exit tangent is the direction from cp2 to p1.
+    // This ensures smooth joins when cp1 of the next segment mirrors this direction.
     private static PointF BezierExitTangent(PointF cp2, PointF p1)
     {
         float dx  = p1.X - cp2.X;
@@ -62,11 +84,15 @@ public class Ladybug
         return len > 0 ? new PointF(dx / len, dy / len) : new PointF(1f, 0f);
     }
 
-    // --- Arc length ---
+    // --- Arc length tables ---
 
+    // Pre-builds a local arc length table for each Bézier segment.
+    // Each table maps sample indices to cumulative pixel distances within that segment,
+    // allowing SampleAtDistance to binary search for the exact position without
+    // recomputing anything at runtime.
     private void BuildArcTables()
     {
-        _segmentEndDistances  = new float[_beziers.Count];
+        _segmentEndDistances   = new float[_beziers.Count];
         _segmentLocalArcTables = new List<float[]>();
         float cumulative = 0f;
         const int localSamples = 40;
@@ -80,14 +106,14 @@ public class Ladybug
 
             for (int step = 1; step <= localSamples; step++)
             {
-                float   progress     = step / (float)localSamples;
-                PointF  currentPoint = EvaluateBezier(p0, cp1, cp2, p1, progress);
-                float   dx           = currentPoint.X - previousPoint.X;
-                float   dy           = currentPoint.Y - previousPoint.Y;
-                float   stepLength   = (float)Math.Sqrt(dx * dx + dy * dy);
-                localArc[step]       = localArc[step - 1] + stepLength;
-                cumulative          += stepLength;
-                previousPoint        = currentPoint;
+                float  progress     = step / (float)localSamples;
+                PointF currentPoint = EvaluateBezier(p0, cp1, cp2, p1, progress);
+                float  dx           = currentPoint.X - previousPoint.X;
+                float  dy           = currentPoint.Y - previousPoint.Y;
+                float  stepLength   = (float)Math.Sqrt(dx * dx + dy * dy);
+                localArc[step]      = localArc[step - 1] + stepLength;
+                cumulative         += stepLength;
+                previousPoint       = currentPoint;
             }
 
             _segmentLocalArcTables.Add(localArc);
@@ -97,7 +123,9 @@ public class Ladybug
         _totalLength = cumulative;
     }
 
-
+    // Returns the world position at a given pixel distance along the full path.
+    // Finds the right segment via _segmentEndDistances, then binary searches
+    // that segment's pre-built arc table for the precise local progress value.
     private PointF SampleAtDistance(float targetDistance)
     {
         targetDistance = Math.Clamp(targetDistance, 0f, _totalLength);
@@ -113,11 +141,10 @@ public class Ladybug
                 float segmentLength    = segmentEndDistance - segmentStartDistance;
                 if (segmentLength <= 0f) return p0;
 
-                float   localTarget = targetDistance - segmentStartDistance;
-                float[] localArc    = _segmentLocalArcTables[bezierIndex];
+                float   localTarget  = targetDistance - segmentStartDistance;
+                float[] localArc     = _segmentLocalArcTables[bezierIndex];
                 int     localSamples = localArc.Length - 1;
 
-                // Binary search the pre-built local arc table — no rebuilding
                 int lo = 0, hi = localSamples;
                 while (lo < hi - 1)
                 {
@@ -129,8 +156,7 @@ public class Ladybug
                 float blend = (localArc[hi] - localArc[lo]) > 0f
                     ? (localTarget - localArc[lo]) / (localArc[hi] - localArc[lo])
                     : 0f;
-                float localProgress = Math.Clamp(
-                    (lo + blend) / localSamples, 0f, 1f);
+                float localProgress = Math.Clamp((lo + blend) / localSamples, 0f, 1f);
 
                 return EvaluateBezier(p0, cp1, cp2, p1, localProgress);
             }
@@ -143,6 +169,12 @@ public class Ladybug
 
     // --- Path generation ---
 
+    // Generates a complete path for this ladybug from scratch.
+    // The path consists of:
+    //   1. A series of expressive curved Bézier segments with random heading evolution
+    //   2. Zero, one, or two oval loops inserted organically between curve segments
+    //   3. A natural exit — continuation segments are added until the path leaves the screen,
+    //      at which point the final segment is clipped at the boundary
     private void GeneratePath()
     {
         var random = new Random();
@@ -161,10 +193,14 @@ public class Ladybug
         int curveSegmentCount = random.Next(3, 6);
         int loopsRemaining    = loopCount;
         float baseStepDist    = Math.Min(_screenW, _screenH) * 0.35f;
-        float headingAngle    = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
+
+        // headingAngle drives the overall direction of travel and evolves gradually
+        // each segment so the path curves organically without wild direction changes
+        float headingAngle = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
 
         for (int segmentIndex = 0; segmentIndex < curveSegmentCount; segmentIndex++)
         {
+            // Nudge heading by up to ~63 degrees — large enough for expressive curves
             headingAngle += (float)(random.NextDouble() * 1.1f * 2 - 1.1f);
 
             PointF targetTangent = new PointF(
@@ -182,10 +218,15 @@ public class Ladybug
 
             float controlDist = segmentDist * 0.45f;
 
+            // cp1 starts exactly along exitTangent — this is the mathematical requirement
+            // for tangent continuity at the join with the previous segment
             PointF cp1 = new PointF(
                 currentPoint.X + exitTangent.X * controlDist,
                 currentPoint.Y + exitTangent.Y * controlDist);
 
+            // cp2 is bowed perpendicularly to targetTangent by a random amount.
+            // Because cp1 and cp2 pull in different directions, each segment
+            // has an S-curve character even though entry tangent is always continuous.
             PointF cp2Perp = new PointF(-targetTangent.Y, targetTangent.X);
             float  cp2Bow  = segmentDist * (float)(random.NextDouble() * 0.5 + 0.25)
                              * (random.Next(0, 2) == 0 ? 1f : -1f);
@@ -198,6 +239,9 @@ public class Ladybug
             exitTangent  = BezierExitTangent(cp2, segmentEnd);
             currentPoint = segmentEnd;
 
+            // Decide whether to insert a loop after this segment.
+            // The second condition forces remaining loops to be placed if we're
+            // running out of segments to place them in.
             bool insertLoop = loopsRemaining > 0
                               && (random.Next(0, 2) == 0
                                   || loopsRemaining >= curveSegmentCount - segmentIndex - 1);
@@ -209,24 +253,30 @@ public class Ladybug
                 bool  loopAbove     = random.Next(0, 2) == 0;
                 float loopDirection = loopAbove ? -1f : 1f;
 
+                // Perpendicular to travel direction — determines which side the loop bulges
                 PointF loopPerpendicular = new PointF(
                     -loopDirection * exitTangent.Y,
                      loopDirection * exitTangent.X);
 
+                // ovalHeight < loopRadius makes the loop taller than it is wide
                 float  ovalHeight = loopRadius * 0.8f;
                 PointF loopCenter = new PointF(
                     currentPoint.X + loopPerpendicular.X * ovalHeight,
                     currentPoint.Y + loopPerpendicular.Y * ovalHeight);
 
+                // Standard Bézier circle approximation constant, reduced slightly for oval shape
                 float circleConstant = loopRadius * 0.5522848f * 0.8f;
 
+                // Entry angle = direction from loop center back to the entry point on the oval
                 float entryAngle = (float)Math.Atan2(
                     currentPoint.Y - loopCenter.Y,
                     currentPoint.X - loopCenter.X);
 
+                // 5 points define the oval — [0] and [4] are both the entry/exit point
                 PointF[] circlePoints = new PointF[5];
                 circlePoints[0] = currentPoint;
                 circlePoints[4] = currentPoint;
+
                 for (int quarterIndex = 1; quarterIndex <= 3; quarterIndex++)
                 {
                     float pointAngle = entryAngle
@@ -235,6 +285,9 @@ public class Ladybug
                     float rawX = loopRadius * (float)Math.Cos(pointAngle);
                     float rawY = loopRadius * (float)Math.Sin(pointAngle);
 
+                    // Project raw circle point onto travel and perpendicular axes,
+                    // then scale the travel axis by 0.6 to squash the loop into an oval
+                    // that is taller than it is wide relative to the direction of travel
                     float alongTravel = rawX * exitTangent.X       + rawY * exitTangent.Y;
                     float alongPerp   = rawX * loopPerpendicular.X + rawY * loopPerpendicular.Y;
 
@@ -243,6 +296,8 @@ public class Ladybug
                         loopCenter.Y + alongTravel * exitTangent.Y      * 0.6f + alongPerp * loopPerpendicular.Y);
                 }
 
+                // Build 4 quarter-arc Bézier segments approximating the oval.
+                // Control points are derived from the circle tangent at each point.
                 for (int quarterIndex = 0; quarterIndex < 4; quarterIndex++)
                 {
                     float angleAtStart = entryAngle
@@ -257,6 +312,9 @@ public class Ladybug
                         loopDirection * -(float)Math.Sin(angleAtEnd),
                         loopDirection *  (float)Math.Cos(angleAtEnd));
 
+                    // Force the first quarter's cp1 to use exitTangent rather than the
+                    // geometric circle tangent — this guarantees a seamless join between
+                    // the approach curve and the loop entry
                     PointF cp1Tangent = quarterIndex == 0 ? exitTangent : tangentAtStart;
 
                     PointF quarterCp1 = new PointF(
@@ -273,14 +331,17 @@ public class Ladybug
                         circlePoints[quarterIndex + 1]));
                 }
 
+                // Update exitTangent and headingAngle from the loop's exit so the next
+                // curve segment flows naturally from wherever the loop left off
                 exitTangent  = BezierExitTangent(_beziers[^1].cp2, _beziers[^1].p1);
                 headingAngle = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
                 currentPoint = circlePoints[4];
             }
         }
 
-        // Keep generating curve segments until the path exits the screen naturally
-        // No forced endpoint — wherever it crosses the boundary is the exit
+        // After the main segments and loops, keep adding continuation segments
+        // with the same curving logic until the path naturally exits the screen.
+        // The final segment is clipped at the exact screen boundary crossing point.
         bool exited = false;
         while (!exited)
         {
@@ -314,22 +375,21 @@ public class Ladybug
                 continuationEnd.Y - continuationTangent.Y * continuationControlDist
                                   + continuationCp2Perp.Y * continuationCp2Bow);
 
-            // Check if this segment exits the screen
             float exitT = FindScreenExitT(currentPoint, continuationCp1, continuationCp2, continuationEnd);
             if (exitT < 1f)
             {
-                // Clip the segment at the exit point — that becomes the natural endpoint
+                // This segment crosses the screen boundary — clip it at the crossing point.
+                // De Casteljau subdivision: scale cp1 forward and cp2 backward by exitT
+                // to get control points for the clipped sub-segment.
                 PointF clippedEnd = EvaluateBezier(
                     currentPoint, continuationCp1, continuationCp2, continuationEnd, exitT);
 
-                // Scale cp2 to the clipped length so the tangent is still meaningful
-                float scale = exitT;
                 PointF clippedCp1 = new PointF(
-                    currentPoint.X     + (continuationCp1.X - currentPoint.X)     * scale,
-                    currentPoint.Y     + (continuationCp1.Y - currentPoint.Y)     * scale);
+                    currentPoint.X    + (continuationCp1.X - currentPoint.X)    * exitT,
+                    currentPoint.Y    + (continuationCp1.Y - currentPoint.Y)    * exitT);
                 PointF clippedCp2 = new PointF(
-                    continuationCp2.X  + (clippedEnd.X      - continuationCp2.X)  * (1f - scale),
-                    continuationCp2.Y  + (clippedEnd.Y      - continuationCp2.Y)  * (1f - scale));
+                    continuationCp2.X + (clippedEnd.X      - continuationCp2.X) * (1f - exitT),
+                    continuationCp2.Y + (clippedEnd.Y      - continuationCp2.Y) * (1f - exitT));
 
                 _beziers.Add((currentPoint, clippedCp1, clippedCp2, clippedEnd));
                 exited = true;
@@ -341,68 +401,68 @@ public class Ladybug
                 currentPoint = continuationEnd;
             }
 
-            // Safety cap — shouldn't normally be needed but prevents infinite loop
+            // Safety cap to prevent an infinite loop if the path never exits
             if (_beziers.Count > 30) exited = true;
         }
 
         BuildArcTables();
     }
 
-
     // --- Edge helpers ---
 
+    // Returns a random point just outside the given screen edge,
+    // so the bug starts off-screen and enters naturally.
     private PointF RandomPointOnEdge(int edge, Random random) => edge switch
     {
-        0 => new PointF(random.Next(0, _screenW), -_spriteH),
-        1 => new PointF(_screenW + _spriteW,       random.Next(0, _screenH)),
-        2 => new PointF(random.Next(0, _screenW),  _screenH + _spriteH),
-        _ => new PointF(-_spriteW,                 random.Next(0, _screenH))
+        0 => new PointF(random.Next(0, _screenW), -_spriteH),           // top
+        1 => new PointF(_screenW + _spriteW,       random.Next(0, _screenH)), // right
+        2 => new PointF(random.Next(0, _screenW),  _screenH + _spriteH),  // bottom
+        _ => new PointF(-_spriteW,                 random.Next(0, _screenH))  // left
     };
 
+    // Returns the inward-pointing tangent from the given edge,
+    // with a small random wobble so paths aren't perfectly perpendicular to the edge.
     private PointF EdgeOutwardTangent(int edge, Random random)
     {
         float wobble = (float)(random.NextDouble() * 0.4 - 0.2);
         PointF rawDirection = edge switch
         {
-            0 => new PointF(wobble,  1f),
-            1 => new PointF(-1f,     wobble),
-            2 => new PointF(wobble, -1f),
-            _ => new PointF(1f,      wobble)
+            0 => new PointF(wobble,  1f),   // top — heading down
+            1 => new PointF(-1f,     wobble), // right — heading left
+            2 => new PointF(wobble, -1f),   // bottom — heading up
+            _ => new PointF(1f,      wobble)  // left — heading right
         };
         float length = (float)Math.Sqrt(
             rawDirection.X * rawDirection.X + rawDirection.Y * rawDirection.Y);
         return new PointF(rawDirection.X / length, rawDirection.Y / length);
     }
-    
+
+    // Returns true if the point is outside the screen boundary
+    // (accounting for sprite size so bugs fully exit before being retired)
     private bool IsOutsideScreen(PointF point)
     {
         return point.X < -_spriteW
-               || point.X > _screenW + _spriteW
-               || point.Y < -_spriteH
-               || point.Y > _screenH + _spriteH;
+            || point.X > _screenW + _spriteW
+            || point.Y < -_spriteH
+            || point.Y > _screenH + _spriteH;
     }
 
-    // Binary search for the t value where the Bézier first crosses outside the screen
+    // Binary searches for the t value (0–1) where this Bézier segment
+    // first crosses outside the screen boundary.
+    // Returns 1f if the segment stays entirely on screen.
     private float FindScreenExitT(PointF p0, PointF cp1, PointF cp2, PointF p1)
     {
-        // If the endpoint is inside the screen, no exit in this segment
         if (!IsOutsideScreen(p1)) return 1f;
+        if (IsOutsideScreen(p0))  return 0f;
 
-        // If the startpoint is already outside, exit immediately
-        if (IsOutsideScreen(p0)) return 0f;
-
-        float low  = 0f;
-        float high = 1f;
-
+        float low = 0f, high = 1f;
         for (int iteration = 0; iteration < 16; iteration++)
         {
             float  mid      = (low + high) / 2f;
             PointF midPoint = EvaluateBezier(p0, cp1, cp2, p1, mid);
-
             if (IsOutsideScreen(midPoint)) high = mid;
             else                           low  = mid;
         }
-
         return (low + high) / 2f;
     }
 
@@ -421,6 +481,7 @@ public class Ladybug
 
         Position = SampleAtDistance(_distanceTraveled);
 
+        // Look slightly ahead along the path to determine the bug's facing direction
         PointF lookAheadPoint = SampleAtDistance(
             Math.Min(_distanceTraveled + 8f, _totalLength));
         float dx = lookAheadPoint.X - Position.X;
@@ -428,21 +489,23 @@ public class Ladybug
         RotationAngle = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI) + 90f;
 
         _distanceSinceLastDot += _pixelsPerFrame;
-        if (_distanceSinceLastDot >= DotSpacing)
+        if (_distanceSinceLastDot >= _dotSpacing)
         {
-            Trail.Add(new TrailDot(Position));
+            Trail.Add(new TrailDot(Position, _dotRadius));
             _distanceSinceLastDot = 0f;
         }
 
         foreach (var dot in Trail) dot.Update();
         Trail.RemoveAll(dot => dot.IsDead);
     }
-    
+
+    // Draws trail dots — called before DrawSprite so dots always appear behind the bug
     public void DrawTrail(Graphics g)
     {
         foreach (var dot in Trail) dot.Draw(g);
     }
 
+    // Draws the ladybug sprite, rotated to face its direction of travel
     public void DrawSprite(Graphics g)
     {
         var graphicsState = g.Save();
