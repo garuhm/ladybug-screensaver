@@ -8,6 +8,7 @@ public class Ladybug
     private List<(PointF p0, PointF cp1, PointF cp2, PointF p1)> _beziers = new();
 
     private float[] _segmentEndDistances = Array.Empty<float>();
+    private List<float[]> _segmentLocalArcTables = new();
     private float   _totalLength;
     private const int SamplesPerBezier = 80;
 
@@ -65,35 +66,42 @@ public class Ladybug
 
     private void BuildArcTables()
     {
-        _segmentEndDistances = new float[_beziers.Count];
+        _segmentEndDistances  = new float[_beziers.Count];
+        _segmentLocalArcTables = new List<float[]>();
         float cumulative = 0f;
+        const int localSamples = 40;
 
         for (int bezierIndex = 0; bezierIndex < _beziers.Count; bezierIndex++)
         {
             var (p0, cp1, cp2, p1) = _beziers[bezierIndex];
-            PointF previousPoint   = p0;
+            var localArc = new float[localSamples + 1];
+            localArc[0] = 0f;
+            PointF previousPoint = p0;
 
-            for (int step = 1; step <= SamplesPerBezier; step++)
+            for (int step = 1; step <= localSamples; step++)
             {
-                float   progress     = step / (float)SamplesPerBezier;
+                float   progress     = step / (float)localSamples;
                 PointF  currentPoint = EvaluateBezier(p0, cp1, cp2, p1, progress);
                 float   dx           = currentPoint.X - previousPoint.X;
                 float   dy           = currentPoint.Y - previousPoint.Y;
-                cumulative          += (float)Math.Sqrt(dx * dx + dy * dy);
+                float   stepLength   = (float)Math.Sqrt(dx * dx + dy * dy);
+                localArc[step]       = localArc[step - 1] + stepLength;
+                cumulative          += stepLength;
                 previousPoint        = currentPoint;
             }
 
+            _segmentLocalArcTables.Add(localArc);
             _segmentEndDistances[bezierIndex] = cumulative;
         }
 
         _totalLength = cumulative;
     }
 
+
     private PointF SampleAtDistance(float targetDistance)
     {
         targetDistance = Math.Clamp(targetDistance, 0f, _totalLength);
 
-        // Find which Bézier segment contains this distance
         float segmentStartDistance = 0f;
         for (int bezierIndex = 0; bezierIndex < _beziers.Count; bezierIndex++)
         {
@@ -105,25 +113,11 @@ public class Ladybug
                 float segmentLength    = segmentEndDistance - segmentStartDistance;
                 if (segmentLength <= 0f) return p0;
 
-                // Build a fine local arc table for this segment on the fly
-                // so we can binary search with accurate distances
-                float localTarget = targetDistance - segmentStartDistance;
-                const int localSamples = 40;
-                float[] localArc = new float[localSamples + 1];
-                localArc[0] = 0f;
-                PointF prev = p0;
+                float   localTarget = targetDistance - segmentStartDistance;
+                float[] localArc    = _segmentLocalArcTables[bezierIndex];
+                int     localSamples = localArc.Length - 1;
 
-                for (int i = 1; i <= localSamples; i++)
-                {
-                    float   sampleProgress = i / (float)localSamples;
-                    PointF  curr           = EvaluateBezier(p0, cp1, cp2, p1, sampleProgress);
-                    float   dx             = curr.X - prev.X;
-                    float   dy             = curr.Y - prev.Y;
-                    localArc[i]            = localArc[i - 1] + (float)Math.Sqrt(dx * dx + dy * dy);
-                    prev                   = curr;
-                }
-
-                // Binary search the local arc table for the exact progress value
+                // Binary search the pre-built local arc table — no rebuilding
                 int lo = 0, hi = localSamples;
                 while (lo < hi - 1)
                 {
@@ -132,10 +126,11 @@ public class Ladybug
                     else hi = mid;
                 }
 
-                float blend         = (localArc[hi] - localArc[lo]) > 0f
+                float blend = (localArc[hi] - localArc[lo]) > 0f
                     ? (localTarget - localArc[lo]) / (localArc[hi] - localArc[lo])
                     : 0f;
-                float localProgress = Math.Clamp((lo + blend) / localSamples, 0f, 1f);
+                float localProgress = Math.Clamp(
+                    (lo + blend) / localSamples, 0f, 1f);
 
                 return EvaluateBezier(p0, cp1, cp2, p1, localProgress);
             }
