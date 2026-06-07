@@ -7,11 +7,23 @@ public class ScreensaverForm : Form
     private readonly List<Ladybug> _ladybugs = new();
     private readonly System.Windows.Forms.Timer _timer;
     private readonly Bitmap _backBuffer;
-    private readonly Graphics _backBufferGraphics; // cached — not recreated every frame
+    private readonly Graphics _backBufferGraphics;
     private readonly Image _sprite;
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int ShowCursor(bool bShow);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SetParent(IntPtr childHandle, IntPtr parentHandle);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr handle, out Rectangle rect);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int SetWindowLong(IntPtr handle, int index, int newLong);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr handle, int index);
 
     private static readonly Color BgColor = Color.FromArgb(198, 230, 188);
 
@@ -53,12 +65,55 @@ public class ScreensaverForm : Form
             _timer.Start();
 
             KeyDown    += (_, _) => Application.Exit();
-            MouseMove  += (_, _) => Application.Exit();
+            // MouseMove  += (_, _) => Application.Exit();
             MouseClick += (_, _) => Application.Exit();
         }
         catch (Exception ex)
         {
             MessageBox.Show("CRASH: " + ex.Message + "\n\n" + ex.StackTrace);
+        }
+    }
+
+    public ScreensaverForm(IntPtr previewHandle)
+    {
+        try
+        {
+            GetClientRect(previewHandle, out Rectangle previewRect);
+
+            FormBorderStyle = FormBorderStyle.None;
+            DoubleBuffered  = true;
+            BackColor       = BgColor;
+            Size            = new Size(previewRect.Width, previewRect.Height);
+            Location        = new Point(0, 0);
+
+            SetParent(Handle, previewHandle);
+
+            const int GWL_STYLE = -16;
+            const int WS_CHILD  = 0x40000000;
+            SetWindowLong(Handle, GWL_STYLE,
+                GetWindowLong(Handle, GWL_STYLE) | WS_CHILD);
+
+            _sprite = Image.FromFile("Assets/ladybug.png");
+
+            _backBuffer         = new Bitmap(previewRect.Width, previewRect.Height);
+            _backBufferGraphics = Graphics.FromImage(_backBuffer);
+            _backBufferGraphics.SmoothingMode =
+                System.Drawing.Drawing2D.SmoothingMode.HighSpeed;
+            _backBufferGraphics.CompositingQuality =
+                System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+            _backBufferGraphics.InterpolationMode =
+                System.Drawing.Drawing2D.InterpolationMode.Low;
+
+            _ladybugs.Add(new Ladybug(previewRect.Width, previewRect.Height, _sprite));
+            _spawnCooldown = _rng.Next(MinSpawnInterval, MaxSpawnInterval);
+
+            _timer = new System.Windows.Forms.Timer { Interval = 16 };
+            _timer.Tick += OnTick;
+            _timer.Start();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Preview CRASH: " + ex.Message + "\n\n" + ex.StackTrace);
         }
     }
 
@@ -101,7 +156,7 @@ public class ScreensaverForm : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
-        _backBufferGraphics.Dispose();
+        _backBufferGraphics?.Dispose();
         ShowCursor(true);
         base.OnFormClosed(e);
     }
