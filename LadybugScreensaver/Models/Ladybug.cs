@@ -175,7 +175,6 @@ public class Ladybug
         {
             bool isLastSegment = segmentIndex == curveSegmentCount - 1;
 
-            // Evolve heading gradually — large enough for expressive curves
             float maxTurnRadians = 1.1f;
             headingAngle += (float)(random.NextDouble() * maxTurnRadians * 2 - maxTurnRadians);
 
@@ -196,15 +195,10 @@ public class Ladybug
 
             float controlDist = segmentDist * 0.45f;
 
-            // cp1 — must start EXACTLY along exitTangent, no perpendicular bow
-            // This is what guarantees tangent continuity at every join
             PointF cp1 = new PointF(
                 currentPoint.X + exitTangent.X * controlDist,
                 currentPoint.Y + exitTangent.Y * controlDist);
 
-            // cp2 — bowed perpendicularly to targetTangent
-            // Because cp1 and cp2 pull in different directions, the segment
-            // is S-shaped even though the entry tangent is continuous
             PointF cp2Perp = new PointF(-targetTangent.Y, targetTangent.X);
             float  cp2Bow  = segmentDist * (float)(random.NextDouble() * 0.5 + 0.25)
                              * (random.Next(0, 2) == 0 ? 1f : -1f);
@@ -217,10 +211,9 @@ public class Ladybug
             exitTangent  = BezierExitTangent(cp2, segmentEnd);
             currentPoint = segmentEnd;
 
-            // Insert a loop after this segment if scheduled
             bool insertLoop = loopsRemaining > 0
                               && !isLastSegment
-                              && random.Next(0, curveSegmentCount - segmentIndex) <= loopsRemaining;
+                              && (random.Next(0, 2) == 0 || loopsRemaining >= curveSegmentCount - segmentIndex - 1);
             if (insertLoop)
             {
                 loopsRemaining--;
@@ -233,11 +226,14 @@ public class Ladybug
                     -loopDirection * exitTangent.Y,
                      loopDirection * exitTangent.X);
 
+                // Oval: center is closer than loopRadius so loop is squashed perpendicularly
+                float ovalHeight = loopRadius * 0.8f;
                 PointF loopCenter = new PointF(
-                    currentPoint.X + loopPerpendicular.X * loopRadius,
-                    currentPoint.Y + loopPerpendicular.Y * loopRadius);
+                    currentPoint.X + loopPerpendicular.X * ovalHeight,
+                    currentPoint.Y + loopPerpendicular.Y * ovalHeight);
 
-                float circleConstant = loopRadius * 0.5522848f;
+                // Reduced circleConstant for oval shape
+                float circleConstant = loopRadius * 0.5522848f * 0.8f;
 
                 float entryAngle = (float)Math.Atan2(
                     currentPoint.Y - loopCenter.Y,
@@ -250,9 +246,18 @@ public class Ladybug
                 {
                     float pointAngle = entryAngle
                                        + loopDirection * quarterIndex * (float)Math.PI / 2f;
+
+                    float rawX = loopRadius * (float)Math.Cos(pointAngle);
+                    float rawY = loopRadius * (float)Math.Sin(pointAngle);
+
+                    // Project onto travel and perpendicular axes, scale differently
+                    // full loopRadius along travel = wide, 0.6x along perp = squashed
+                    float alongTravel = rawX * exitTangent.X       + rawY * exitTangent.Y;
+                    float alongPerp   = rawX * loopPerpendicular.X + rawY * loopPerpendicular.Y;
+
                     circlePoints[quarterIndex] = new PointF(
-                        loopCenter.X + loopRadius * (float)Math.Cos(pointAngle),
-                        loopCenter.Y + loopRadius * (float)Math.Sin(pointAngle));
+                        loopCenter.X + alongTravel * exitTangent.X       * 0.6f + alongPerp * loopPerpendicular.X,
+                        loopCenter.Y + alongTravel * exitTangent.Y       * 0.6f + alongPerp * loopPerpendicular.Y);
                 }
 
                 for (int quarterIndex = 0; quarterIndex < 4; quarterIndex++)
@@ -269,7 +274,6 @@ public class Ladybug
                         loopDirection * -(float)Math.Sin(angleAtEnd),
                         loopDirection *  (float)Math.Cos(angleAtEnd));
 
-                    // Force first cp1 to exitTangent — seamless join into loop
                     PointF cp1Tangent = quarterIndex == 0 ? exitTangent : tangentAtStart;
 
                     PointF quarterCp1 = new PointF(
@@ -286,7 +290,6 @@ public class Ladybug
                         circlePoints[quarterIndex + 1]));
                 }
 
-                // Loop exit — update heading to match so next segment flows naturally
                 exitTangent  = BezierExitTangent(_beziers[^1].cp2, _beziers[^1].p1);
                 headingAngle = (float)Math.Atan2(exitTangent.Y, exitTangent.X);
                 currentPoint = circlePoints[4];
