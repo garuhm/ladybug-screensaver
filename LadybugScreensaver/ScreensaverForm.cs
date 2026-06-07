@@ -73,11 +73,11 @@ public class ScreensaverForm : Form
 
         // Remove ladybugs that have gone offscreen, but keep their orphaned trail dots alive
         // by moving dots to a separate graveyard list
-        var dead = _ladybugs.Where(b => b.IsOffscreen).ToList();
+        var dead = _ladybugs.Where(b => b.IsFinished).ToList();
         foreach (var bug in dead)
         {
             _orphanedDots.AddRange(bug.Trail);
-            bug.Trail.Clear();         // prevent double-update
+            bug.Trail.Clear();
             _ladybugs.Remove(bug);
         }
 
